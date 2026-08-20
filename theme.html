@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Gridiron Weekly — Fantasy Football, Covered Properly</title>
+<meta name="description" content="Power rankings, matchup analysis, and standings for fantasy football managers who want the story behind the score.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;0,8..60,900;1,8..60,500&family=Public+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6F4EF;
+    --paper-shade:#ECE8DF;
+    --ink:#1B1D1A;
+    --ink-2:#5B5D52;
+    --navy:#1C2B4A;
+    --navy-2:#2A3D63;
+    --brick:#B23A2E;
+    --brass:#B8892F;
+    --line:#D9D4C7;
+    --font-display:'Source Serif 4',serif;
+    --font-body:'Public Sans',sans-serif;
+    --font-mono:'JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  body{background:var(--paper);color:var(--ink);font-family:var(--font-body);line-height:1.6;-webkit-font-smoothing:antialiased;}
+  img,svg{display:block;}
+  a{color:inherit;text-decoration:none;}
+  ul{list-style:none;}
+  button{font:inherit;cursor:pointer;border:none;background:none;color:inherit;}
+  :focus-visible{outline:2px solid var(--brick);outline-offset:3px;}
+  .container{width:100%;max-width:1140px;margin:0 auto;padding:0 24px;}
+  .section{padding:80px 0;border-bottom:1px solid var(--line);}
+  @media (max-width:700px){.section{padding:52px 0;}}
+  .section-head{margin-bottom:44px;}
+  .kicker{font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.12em;font-size:.72rem;color:var(--brick);margin-bottom:12px;}
+  h2.section-title{font-family:var(--font-display);font-weight:700;font-size:clamp(1.7rem,3vw,2.5rem);letter-spacing:-.01em;}
+  .muted{color:var(--ink-2);}
+  /* Glass buttons — layered gradients + soft shadow, built by hand rather than a flat fill */
+  .btn-glass{
+    position:relative;display:inline-flex;align-items:center;gap:10px;
+    padding:14px 28px;border-radius:10px;
+    background:linear-gradient(180deg,#ffffff 0%,#EFE9DC 100%);
+    border:1px solid rgba(184,137,47,.4);
+    box-shadow:0 1px 2px rgba(27,29,26,.10), 0 10px 22px rgba(27,29,26,.12), inset 0 1px 0 rgba(255,255,255,.9);
+    color:var(--navy);font-family:var(--font-mono);font-weight:700;font-size:.8rem;
+    text-transform:uppercase;letter-spacing:.07em;
+    transition:transform .15s ease, box-shadow .2s ease;
+  }
+  .btn-glass:hover{box-shadow:0 2px 4px rgba(27,29,26,.12), 0 14px 28px rgba(184,137,47,.28), inset 0 1px 0 #fff;transform:translateY(-2px);}
+  .btn-glass:active{transform:translateY(0) scale(.98);box-shadow:0 1px 2px rgba(27,29,26,.14), inset 0 1px 4px rgba(27,29,26,.12);}
+
+  .btn-glass-dark{
+    display:inline-flex;align-items:center;gap:10px;
+    padding:13px 24px;border-radius:10px;
+    background:linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.05));
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.3);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.25), 0 10px 24px rgba(0,0,0,.28);
+    color:#fff;font-weight:700;font-size:.86rem;
+    transition:transform .15s ease, background .2s ease;
+  }
+  .btn-glass-dark:hover{background:linear-gradient(180deg, rgba(255,255,255,.26), rgba(255,255,255,.08));transform:translateY(-2px);}
+  .btn-glass-dark:active{transform:scale(.97);}
+
+  .chip-glass{
+    display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;
+    background:linear-gradient(180deg, rgba(255,255,255,.2), rgba(255,255,255,.06));
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    border:1px solid rgba(255,255,255,.32);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.28);
+    color:#fff;font-weight:600;transition:background .2s;
+  }
+  .chip-glass:hover{background:linear-gradient(180deg, rgba(255,255,255,.3), rgba(255,255,255,.1));}
+
+  .btn-ghost{color:var(--navy);font-weight:600;font-size:.92rem;display:inline-flex;align-items:center;gap:8px;border-bottom:1px solid var(--navy);padding-bottom:2px;}
+  .btn-ghost:hover{color:var(--brick);border-color:var(--brick);}
+  .hero-cta-row{display:flex;align-items:center;gap:22px;flex-wrap:wrap;margin-bottom:28px;}
+
+  /* UTILITY BAR */
+  .utility-bar{background:var(--navy);color:#D9DEE8;font-family:var(--font-mono);font-size:.72rem;letter-spacing:.04em;}
+  .utility-inner{display:flex;justify-content:space-between;align-items:center;min-height:44px;padding:7px 0;text-transform:uppercase;}
+  .utility-right{display:flex;gap:22px;}
+  .utility-right a:hover{color:#fff;}
+  @media (max-width:560px){.utility-right a:first-child{display:none;}}
+
+  /* MASTHEAD */
+  .masthead{padding:40px 0 0;text-align:center;position:relative;z-index:40;background:var(--paper);}
+  .masthead-title{font-family:var(--font-display);font-weight:900;font-size:clamp(2rem,5.5vw,3.4rem);letter-spacing:-.01em;}
+  .masthead-tagline{font-family:var(--font-display);font-style:italic;color:var(--ink-2);font-size:1rem;margin-top:8px;}
+  .masthead-nav-row{display:flex;justify-content:center;align-items:center;gap:36px;margin-top:28px;padding-bottom:18px;border-bottom:3px solid var(--ink);position:relative;}
+  .masthead-nav-row a{font-family:var(--font-mono);font-size:.76rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-2);}
+  .masthead-nav-row a:hover{color:var(--brick);}
+  .menu-toggle{
+    display:none;position:absolute;right:0;top:-6px;
+    font-family:var(--font-mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;
+    padding:9px 18px;border-radius:999px;border:1px solid rgba(184,137,47,.4);
+    background:linear-gradient(180deg,#ffffff 0%,#EFE9DC 100%);
+    box-shadow:0 1px 2px rgba(27,29,26,.08), 0 6px 14px rgba(27,29,26,.1), inset 0 1px 0 rgba(255,255,255,.9);
+    color:var(--navy);transition:transform .15s ease, box-shadow .2s ease;
+  }
+  .menu-toggle:active{transform:scale(.96);}
+  @media (max-width:760px){
+    .masthead-nav-row{display:none;}
+    .menu-toggle{display:block;}
+    .masthead{padding-bottom:18px;border-bottom:3px solid var(--ink);}
+  }
+  .mobile-drawer{max-height:0;overflow:hidden;background:var(--paper);transition:max-height .3s ease;border-bottom:1px solid var(--line);}
+  .mobile-drawer.open{max-height:340px;}
+  .mobile-drawer .container{padding:8px 24px 20px;display:flex;flex-direction:column;}
+  .mobile-drawer a{font-family:var(--font-display);font-size:1.3rem;padding:12px 0;border-bottom:1px solid var(--line);}
+
+  /* HERO / FEATURE */
+  .feature{padding:56px 0 72px;}
+  .feature-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:56px;align-items:start;}
+  @media (max-width:900px){.feature-grid{grid-template-columns:1fr;gap:36px;}}
+  .feature-headline{font-family:var(--font-display);font-weight:700;font-size:clamp(2rem,4.4vw,3.2rem);line-height:1.08;letter-spacing:-.01em;margin:14px 0 20px;}
+  .feature-dek{font-size:1.12rem;color:var(--ink-2);max-width:56ch;margin-bottom:22px;}
+  .byline{font-family:var(--font-mono);font-size:.78rem;color:var(--ink-2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:28px;padding-bottom:22px;border-bottom:1px solid var(--line);}
+  .byline em{font-style:italic;font-family:var(--font-display);text-transform:none;color:var(--ink);}
+
+  .stat-panel{background:var(--navy);color:#fff;padding:34px;border-radius:2px;}
+  .stat-panel h4{font-family:var(--font-mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:#B9C2D6;margin-bottom:20px;}
+  .stat-row{display:flex;justify-content:space-between;align-items:baseline;padding:14px 0;border-bottom:1px solid rgba(255,255,255,.14);}
+  .stat-row:last-child{border-bottom:none;}
+  .stat-row span{font-size:.88rem;color:#B9C2D6;}
+  .stat-row b{font-family:var(--font-mono);font-size:1.3rem;color:var(--brass);}
+
+  /* POWER RANKINGS (signature) */
+  .rankings-list{border-top:1px solid var(--ink);}
+  .rank-item{display:grid;grid-template-columns:auto 1fr auto;gap:24px;align-items:center;padding:26px 0;border-bottom:1px solid var(--line);}
+  .rank-num{font-family:var(--font-display);font-weight:900;font-size:2.4rem;color:var(--line);width:64px;line-height:1;}
+  .rank-body h4{font-family:var(--font-display);font-weight:700;font-size:1.2rem;margin-bottom:6px;}
+  .rank-body p{color:var(--ink-2);font-size:.94rem;max-width:60ch;}
+  .rank-change{display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:.82rem;white-space:nowrap;}
+  .rc-up{color:#4A7A3E;}
+  .rc-down{color:var(--brick);}
+  .rc-flat{color:var(--ink-2);}
+  @media (max-width:640px){
+    .rank-item{grid-template-columns:auto 1fr;}
+    .rank-change{grid-column:2;margin-top:6px;}
+    .rank-num{font-size:1.9rem;width:44px;}
+  }
+
+  /* MATCHUP FEATURE */
+  .matchup-feature{border:1px solid var(--line);background:var(--paper-shade);padding:36px;}
+  .matchup-feature-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:26px;flex-wrap:wrap;gap:8px;}
+  .matchup-feature-head h3{font-family:var(--font-display);font-weight:700;font-size:1.5rem;}
+  .matchup-compare{display:grid;grid-template-columns:1fr auto 1fr;gap:20px;align-items:center;}
+  @media (max-width:640px){.matchup-compare{grid-template-columns:1fr;text-align:center;}}
+  .mc-team h4{font-family:var(--font-display);font-size:1.3rem;margin-bottom:4px;}
+  .mc-team span{font-family:var(--font-mono);font-size:.78rem;color:var(--ink-2);}
+  .mc-vs{font-family:var(--font-mono);color:var(--ink-2);font-size:.8rem;text-align:center;}
+  .mc-stats{margin-top:24px;border-top:1px solid var(--line);padding-top:20px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;text-align:center;}
+  @media (max-width:640px){.mc-stats{grid-template-columns:1fr;}}
+  .mc-stat b{display:block;font-family:var(--font-mono);font-size:1.1rem;color:var(--navy);}
+  .mc-stat span{font-size:.76rem;color:var(--ink-2);text-transform:uppercase;letter-spacing:.05em;}
+
+  /* STANDINGS */
+  .table-wrap{overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;font-size:.94rem;min-width:600px;}
+  thead th{text-align:left;font-family:var(--font-mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2);padding:14px 16px;border-bottom:2px solid var(--ink);}
+  tbody td{padding:16px;border-bottom:1px solid var(--line);}
+  tbody tr:nth-child(even){background:var(--paper-shade);}
+  .rank-td{font-family:var(--font-mono);color:var(--ink-2);}
+  .team-name{font-family:var(--font-display);font-weight:600;font-size:1.02rem;}
+  .mono{font-family:var(--font-mono);}
+
+  /* NEWSLETTER */
+  .newsletter{background:var(--navy);color:#fff;padding:64px 0;}
+  .newsletter-inner{display:flex;justify-content:space-between;align-items:center;gap:32px;flex-wrap:wrap;}
+  .newsletter h2{font-family:var(--font-display);font-weight:700;font-size:clamp(1.6rem,3.4vw,2.3rem);margin-bottom:8px;}
+  .newsletter p{color:#B9C2D6;max-width:44ch;}
+  .glass-input-group{
+    display:flex;align-items:center;gap:10px;
+    background:linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.05));
+    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    border:1px solid rgba(255,255,255,.3);border-radius:12px;
+    padding:6px 8px 6px 18px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.25), 0 12px 28px rgba(0,0,0,.3);
+    flex-shrink:0;
+  }
+  .glass-input-group svg{color:#B9C2D6;flex-shrink:0;}
+  .glass-input-group input{background:transparent;border:none;outline:none;color:#fff;font-family:var(--font-body);font-size:.92rem;width:200px;padding:11px 0;}
+  .glass-input-group input::placeholder{color:#8B96AC;}
+  .glass-input-group button{
+    background:linear-gradient(180deg,#CFA84E,#A87D2E);
+    border:1px solid rgba(255,255,255,.35);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.4), 0 4px 10px rgba(0,0,0,.2);
+    color:var(--navy);font-weight:700;font-size:.86rem;
+    padding:11px 20px;border-radius:8px;white-space:nowrap;
+    transition:filter .2s ease, transform .15s ease;
+  }
+  .glass-input-group button:hover{filter:brightness(1.08);}
+  .glass-input-group button:active{transform:scale(.97);}
+  @media (max-width:560px){
+    .glass-input-group{flex-wrap:wrap;width:100%;padding:14px;}
+    .glass-input-group input{width:100%;order:2;padding:8px 0;}
+    .glass-input-group svg{order:1;}
+    .glass-input-group button{order:3;width:100%;margin-top:4px;}
+  }
+
+  /* FOOTER */
+  .footer{background:var(--ink);color:#C9C7BD;padding:60px 0 28px;}
+  .footer-grid{display:grid;grid-template-columns:1.4fr repeat(3,1fr);gap:40px;margin-bottom:40px;}
+  @media (max-width:760px){.footer-grid{grid-template-columns:1fr 1fr;}}
+  @media (max-width:480px){.footer-grid{grid-template-columns:1fr;}}
+  .footer-brand{font-family:var(--font-display);font-weight:700;font-size:1.3rem;color:#fff;}
+  .footer-brand p{font-family:var(--font-body);color:#9C9A90;font-size:.86rem;max-width:32ch;margin-top:12px;}
+  .footer-col h5{font-family:var(--font-mono);text-transform:uppercase;font-size:.68rem;letter-spacing:.1em;color:#8B897E;margin-bottom:16px;}
+  .footer-col a{display:block;font-size:.9rem;padding:6px 0;color:#C9C7BD;}
+  .footer-col a:hover{color:#fff;}
+  .footer-bottom{display:flex;justify-content:space-between;padding-top:28px;border-top:1px solid #35342E;font-size:.8rem;color:#8B897E;flex-wrap:wrap;gap:12px;}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="ic-up" viewBox="0 0 24 24"><path d="M12 5l7 9H5z" fill="currentColor"/></symbol>
+  <symbol id="ic-down" viewBox="0 0 24 24"><path d="M12 19l-7-9h14z" fill="currentColor"/></symbol>
+  <symbol id="ic-flat" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="2" fill="currentColor"/></symbol>
+  <symbol id="ic-arrow" viewBox="0 0 24 24"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="ic-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 7l8 6 8-6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<div class="utility-bar">
+  <div class="container utility-inner">
+    <span>Week 7 Edition · Aug 20</span>
+    <div class="utility-right">
+      <a href="#">Member Login</a>
+      <a href="#" class="chip-glass">Join a League</a>
+    </div>
+  </div>
+</div>
+
+<div class="masthead">
+  <div class="container" style="position:relative;">
+    <h1 class="masthead-title">THE GRIDIRON WEEKLY</h1>
+    <p class="masthead-tagline">Fantasy football, covered properly.</p>
+    <div class="masthead-nav-row">
+      <a href="#rankings">Power Rankings</a>
+      <a href="#matchup">Matchup</a>
+      <a href="#standings">Standings</a>
+      <a href="#">Dispatch</a>
+    </div>
+    <button class="menu-toggle" id="menuToggle">Menu</button>
+  </div>
+</div>
+<div class="mobile-drawer" id="mobileDrawer">
+  <div class="container">
+    <a href="#rankings">Power Rankings</a>
+    <a href="#matchup">Matchup</a>
+    <a href="#standings">Standings</a>
+    <a href="#">Dispatch</a>
+  </div>
+</div>
+
+<main>
+  <section class="feature">
+    <div class="container feature-grid">
+      <div>
+        <p class="kicker">Commissioner's Desk</p>
+        <h2 class="feature-headline">Seven weeks in, the league has a new favorite.</h2>
+        <p class="feature-dek">The Enforcers have won four straight and now field the league's top-scoring offense — but the Titans' bench points suggest this race is far from settled. A look at the numbers behind the standings.</p>
+        <p class="byline">By <em>The League Desk</em> · Updated Tuesday</p>
+        <div class="hero-cta-row">
+          <a href="#" class="btn-glass">Join This League</a>
+          <a href="#" class="btn-ghost">Read the full recap <svg width="14" height="14"><use href="#ic-arrow"/></svg></a>
+        </div>
+      </div>
+      <div class="stat-panel">
+        <h4>Week 7 At a Glance</h4>
+        <div class="stat-row"><span>Highest score</span><b>102.1</b></div>
+        <div class="stat-row"><span>Lowest score</span><b>64.8</b></div>
+        <div class="stat-row"><span>Closest margin</span><b>1.8</b></div>
+        <div class="stat-row"><span>League average</span><b>84.6</b></div>
+        <div class="stat-row"><span>Total points scored</span><b>2,140</b></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="rankings">
+    <div class="container">
+      <div class="section-head">
+        <p class="kicker">Week 7</p>
+        <h2 class="section-title">Power Rankings</h2>
+      </div>
+      <div class="rankings-list">
+        <div class="rank-item">
+          <div class="rank-num">01</div>
+          <div class="rank-body"><h4>End Zone Enforcers</h4><p>Riding a four-game win streak with the league's top scoring offense. The bye-week bench decisions are the only thing that can stop them.</p></div>
+          <div class="rank-change rc-flat"><svg width="12" height="12"><use href="#ic-flat"/></svg>—</div>
+        </div>
+        <div class="rank-item">
+          <div class="rank-num">02</div>
+          <div class="rank-body"><h4>Blitz Brigade</h4><p>Back-to-back triple-digit weeks. If the receiving corps stays healthy, this is the league's most dangerous playoff team.</p></div>
+          <div class="rank-change rc-up"><svg width="12" height="12"><use href="#ic-up"/></svg>+1</div>
+        </div>
+        <div class="rank-item">
+          <div class="rank-num">03</div>
+          <div class="rank-body"><h4>Turf Titans</h4><p>Dropped a close one but still owns the deepest bench in the league — a problem for everyone come the playoffs.</p></div>
+          <div class="rank-change rc-down"><svg width="12" height="12"><use href="#ic-down"/></svg>-1</div>
+        </div>
+        <div class="rank-item">
+          <div class="rank-num">04</div>
+          <div class="rank-body"><h4>Grid Iron Giants</h4><p>Found a floor after a rough start. The Kane trade is already paying off, and the schedule eases up from here.</p></div>
+          <div class="rank-change rc-up"><svg width="12" height="12"><use href="#ic-up"/></svg>+2</div>
+        </div>
+        <div class="rank-item">
+          <div class="rank-num">05</div>
+          <div class="rank-body"><h4>Draft Day Dynasty</h4><p>Talented but streaky. Three of their last four games were decided by single digits.</p></div>
+          <div class="rank-change rc-down"><svg width="12" height="12"><use href="#ic-down"/></svg>-1</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="matchup">
+    <div class="container">
+      <div class="section-head">
+        <p class="kicker">Featured</p>
+        <h2 class="section-title">Matchup of the Week</h2>
+      </div>
+      <div class="matchup-feature">
+        <div class="matchup-feature-head">
+          <h3>Enforcers at Titans</h3>
+          <span class="mono" style="font-size:.8rem;color:var(--ink-2);">Sunday · 1:00 PM</span>
+        </div>
+        <div class="matchup-compare">
+          <div class="mc-team"><h4>End Zone Enforcers</h4><span>6-1 · 812.4 PF</span></div>
+          <div class="mc-vs">AT</div>
+          <div class="mc-team"><h4>Turf Titans</h4><span>5-2 · 771.3 PF</span></div>
+        </div>
+        <div class="mc-stats">
+          <div class="mc-stat"><b>116.0</b><span>Enforcers Avg</span></div>
+          <div class="mc-stat"><b>58%</b><span>Enforcers Win Odds</span></div>
+          <div class="mc-stat"><b>110.2</b><span>Titans Avg</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="standings">
+    <div class="container">
+      <div class="section-head">
+        <p class="kicker">Through Week 7</p>
+        <h2 class="section-title">Standings</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Rank</th><th>Team</th><th>Record</th><th>PF</th><th>PA</th></tr></thead>
+          <tbody>
+            <tr><td class="rank-td mono">1</td><td class="team-name">End Zone Enforcers</td><td class="mono">6-1</td><td class="mono">812.4</td><td class="mono">640.1</td></tr>
+            <tr><td class="rank-td mono">2</td><td class="team-name">Blitz Brigade</td><td class="mono">5-2</td><td class="mono">794.0</td><td class="mono">655.8</td></tr>
+            <tr><td class="rank-td mono">3</td><td class="team-name">Turf Titans</td><td class="mono">5-2</td><td class="mono">771.3</td><td class="mono">668.9</td></tr>
+            <tr><td class="rank-td mono">4</td><td class="team-name">Grid Iron Giants</td><td class="mono">4-3</td><td class="mono">742.7</td><td class="mono">701.2</td></tr>
+            <tr><td class="rank-td mono">5</td><td class="team-name">Draft Day Dynasty</td><td class="mono">4-3</td><td class="mono">735.5</td><td class="mono">709.0</td></tr>
+            <tr><td class="rank-td mono">6</td><td class="team-name">Red Zone Rebels</td><td class="mono">4-3</td><td class="mono">718.9</td><td class="mono">715.4</td></tr>
+            <tr><td class="rank-td mono">7</td><td class="team-name">Hail Mary Heroes</td><td class="mono">3-4</td><td class="mono">690.2</td><td class="mono">730.6</td></tr>
+            <tr><td class="rank-td mono">8</td><td class="team-name">Fumble Force</td><td class="mono">3-4</td><td class="mono">675.1</td><td class="mono">742.3</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="newsletter">
+    <div class="container newsletter-inner">
+      <div>
+        <h2>The Monday Morning Recap</h2>
+        <p>One email. Every result, every trade, every reason your bench cost you the win.</p>
+      </div>
+      <form class="glass-input-group" onsubmit="event.preventDefault();">
+        <svg width="18" height="18"><use href="#ic-mail"/></svg>
+        <input type="email" placeholder="Enter your email" required>
+        <button type="submit">Subscribe</button>
+      </form>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <div class="footer-brand">THE GRIDIRON WEEKLY</div>
+        <p>Fantasy football coverage for managers who want the story behind the score.</p>
+      </div>
+      <div class="footer-col">
+        <h5>Sections</h5>
+        <a href="#">Power Rankings</a>
+        <a href="#">Standings</a>
+        <a href="#">Matchups</a>
+        <a href="#">Dispatch</a>
+      </div>
+      <div class="footer-col">
+        <h5>League Tools</h5>
+        <a href="#">Commissioner Tools</a>
+        <a href="#">Custom Scoring</a>
+        <a href="#">Keeper Leagues</a>
+        <a href="#">Dynasty Mode</a>
+      </div>
+      <div class="footer-col">
+        <h5>About</h5>
+        <a href="#">Our Staff</a>
+        <a href="#">Contact</a>
+        <a href="#">Support</a>
+        <a href="#">Press</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p>© 2026 The Gridiron Weekly.</p>
+      <p>Published every Tuesday.</p>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const menuToggle = document.getElementById('menuToggle');
+  const mobileDrawer = document.getElementById('mobileDrawer');
+  menuToggle.addEventListener('click', () => {
+    const isOpen = mobileDrawer.classList.toggle('open');
+    menuToggle.textContent = isOpen ? 'Close' : 'Menu';
+  });
+  mobileDrawer.querySelectorAll('a').forEach(a => a.addEventListener('click', () => {
+    mobileDrawer.classList.remove('open');
+    menuToggle.textContent = 'Menu';
+  }));
+</script>
+</body>
+</html>
