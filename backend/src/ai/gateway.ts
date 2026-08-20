@@ -106,8 +106,12 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         },
         timeoutMs: 180_000, // cold starts are real
       });
-    case 'mock':
-      return new MockProvider();
+    case 'mock': {
+      const roster = Array.isArray(providerConfig.roster)
+        ? (providerConfig.roster as ConstructorParameters<typeof MockProvider>[1])
+        : undefined;
+      return new MockProvider({}, roster);
+    }
     default:
       throw new Error(`unknown AI provider: ${key}`);
   }

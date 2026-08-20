@@ -11,7 +11,7 @@ import { log } from './core/logger.js';
 import { registerFeatures } from './core/kernel.js';
 import { seedModelConfig } from './core/model-config.js';
 import { seedProviders } from './ingest/registry.js';
-import { authRoutes } from './routes/auth.js';
+import { authRoutes, registerSessionHooks } from './routes/auth.js';
 import { systemRoutes } from './routes/system.js';
 import { playerRoutes } from './routes/players.js';
 import { adminRoutes } from './routes/admin.js';
@@ -47,6 +47,7 @@ export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance
     reply.code(status).send({ error: status >= 500 ? 'internal error' : err.message });
   });
 
+  registerSessionHooks(app, db);
   await app.register(authRoutes, { db });
   await app.register(systemRoutes, { db });
   await app.register(playerRoutes, { db });
@@ -62,7 +63,9 @@ export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance
     path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../../../frontend/dist'),
   ].find((p) => fs.existsSync(path.join(p, 'index.html')));
   if (frontendDist) {
-    await app.register(fastifyStatic, { root: frontendDist, wildcard: false });
+    // dynamic wildcard serving: per-file routes freeze the file list at boot
+    // and would 404 rebuilt hashed assets into the SPA fallback
+    await app.register(fastifyStatic, { root: frontendDist });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'not found' });
       return reply.sendFile('index.html');
@@ -88,7 +91,16 @@ async function main(): Promise<void> {
   startScheduler(defaultDb);
 }
 
-const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+// realpath both sides: the service invokes via the `current` symlink while
+// Node realpaths the main module URL — a plain string compare would miss
+const isMain = ((): boolean => {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname);
+  } catch {
+    return false;
+  }
+})();
 if (isMain || process.env.FPL_SERVER_AUTOSTART === 'true') {
   main().catch((err) => {
     log.fatal({ err: err instanceof Error ? err.stack : err }, 'server failed to start');
