@@ -1,0 +1,396 @@
+import { describe, it, expect } from 'vitest';
+import { fitTeamStrength, predictFromLambdas, fixtureLambdas, type StrengthMatch } from '../../src/stats/l1-team-strength.js';
+import { deMargin1x2, solveMarketLambdas, blendLambdas } from '../../src/stats/l2-odds.js';
+import { computePlayerFeatures, type MatchRow } from '../../src/stats/l0-features.js';
+import { predictMinutes, type MinutesConfig } from '../../src/stats/l3-minutes.js';
+import { composeXpts, pointsFromStats, expectedSavePoints, type ScoringRules, type BonusProfiles } from '../../src/stats/l9-composer.js';
+import { normaliseName, trigramSimilarity } from '../../src/players/resolver.js';
+import { optimiseSquad, type OptimiserCandidate } from '../../src/fpl/optimiser.js';
+import { DEFAULT_CONFIG } from '../../src/core/model-config.js';
+import type { SquadRules } from '../../src/fpl/rules.js';
+
+const rules = DEFAULT_CONFIG.scoring_rules as ScoringRules;
+const bonusProfiles = DEFAULT_CONFIG.bonus_profiles as BonusProfiles;
+const minutesCfg = DEFAULT_CONFIG.minutes_model as MinutesConfig;
+
+describe('L1 Dixon-Coles', () => {
+  function synthMatches(): StrengthMatch[] {
+    // strong team beats weak team consistently; 3 teams round-robin ×8
+    const teams = { strong: 2.2, mid: 1.3, weak: 0.7 };
+    const matches: StrengthMatch[] = [];
+    const names = Object.keys(teams) as (keyof typeof teams)[];
+    let day = 300;
+    for (let round = 0; round < 8; round++) {
+      for (const h of names) {
+        for (const a of names) {
+          if (h === a) continue;
+          matches.push({
+            homeKey: h,
+            awayKey: a,
+            homeGoals: Math.round(teams[h] * 1.15 + (round % 3) * 0.3),
+            awayGoals: Math.round(teams[a] * 0.85),
+            daysAgo: (day -= 3),
+          });
+        }
+      }
+    }
+    return matches;
+  }
+
+  it('recovers relative strengths from synthetic data', () => {
+    const params = fitTeamStrength(synthMatches());
+    expect(params.attack.strong!).toBeGreaterThan(params.attack.mid!);
+    expect(params.attack.mid!).toBeGreaterThan(params.attack.weak!);
+    expect(params.homeAdv).toBeGreaterThan(0);
+    // identifiability: Σα = Σβ = 0
+    const sumA = Object.values(params.attack).reduce((s, x) => s + x, 0);
+    expect(Math.abs(sumA)).toBeLessThan(1e-6);
+  });
+
+  it('score grid probabilities are a distribution and CS matches concession[0]', () => {
+    const pred = predictFromLambdas(1.6, 1.1, -0.08);
+    expect(pred.pHome + pred.pDraw + pred.pAway).toBeCloseTo(1, 6);
+    const sumConcH = pred.concessionHome.reduce((a, b) => a + b, 0);
+    expect(sumConcH).toBeCloseTo(1, 6);
+    expect(pred.pCsHome).toBeCloseTo(pred.concessionHome[0]!, 10);
+    expect(pred.eConcedePtsHome).toBeLessThanOrEqual(0);
+  });
+
+  it('stronger side gets higher win probability, home advantage counts', () => {
+    const params = fitTeamStrength(synthMatches());
+    const { lambdaHome, lambdaAway } = fixtureLambdas(params, 'strong', 'weak');
+    expect(lambdaHome).toBeGreaterThan(lambdaAway);
+    const pred = predictFromLambdas(lambdaHome, lambdaAway, params.rho);
+    expect(pred.pHome).toBeGreaterThan(0.5);
+  });
+
+  it('promoted-team priors hold with zero matches', () => {
+    const params = fitTeamStrength(synthMatches(), { priorTeams: { promoted: { attack: -0.25, defence: -0.15 } } });
+    expect(params.attack.promoted).toBeDefined();
+    const pred = predictFromLambdas(...(Object.values(fixtureLambdas(params, 'strong', 'promoted')) as [number, number]), params.rho);
+    expect(pred.pHome).toBeGreaterThan(0.4);
+  });
+});
+
+describe('L2 odds', () => {
+  it('Shin de-margin removes overround and preserves order', () => {
+    const dm = deMargin1x2({ home: 1.8, draw: 3.6, away: 4.5, takenAt: new Date() });
+    expect(dm.pHome + dm.pDraw + dm.pAway).toBeCloseTo(1, 6);
+    expect(dm.pHome).toBeGreaterThan(dm.pDraw);
+    expect(dm.pDraw).toBeGreaterThan(dm.pAway);
+    expect(dm.method).toBe('shin');
+  });
+
+  it('market λ solve reproduces the target probabilities', () => {
+    const target = predictFromLambdas(1.7, 1.0, -0.08);
+    const solved = solveMarketLambdas({ pHome: target.pHome, pDraw: target.pDraw, pAway: target.pAway }, -0.08);
+    expect(solved.lambdaHome).toBeCloseTo(1.7, 0);
+    expect(solved.lambdaAway).toBeCloseTo(1.0, 0);
+  });
+
+  it('blend weight decays with staleness and zeroes without odds', () => {
+    const dc = { lambdaHome: 1.5, lambdaAway: 1.2 };
+    const mkt = { lambdaHome: 1.9, lambdaAway: 1.0 };
+    expect(blendLambdas(dc, mkt, 2, 0.65, 48).wMkt).toBeCloseTo(0.65, 5);
+    expect(blendLambdas(dc, mkt, 72, 0.65, 48).wMkt).toBeLessThan(0.65);
+    expect(blendLambdas(dc, null, null, 0.65, 48).wMkt).toBe(0);
+  });
+});
+
+describe('L0 feature factory', () => {
+  const mkRow = (daysAgo: number, over: Partial<MatchRow> = {}): MatchRow => ({
+    kickoff: new Date(Date.now() - daysAgo * 86_400_000),
+    minutes: 90,
+    starts: true,
+    goals: 0,
+    assists: 0,
+    saves: 0,
+    cbit: 8,
+    cbirt: 12,
+    defconCount: 0,
+    xg: 0.3,
+    xa: 0.2,
+    fplPoints: 5,
+    yc: 0,
+    rc: 0,
+    ...over,
+  });
+
+  it('leakage rule: rows at/after asOf never enter', () => {
+    const asOf = new Date();
+    const rows = [mkRow(10), mkRow(-1, { goals: 99, xg: 99 })]; // future row
+    const f = computePlayerFeatures(rows, asOf, 'MID');
+    expect(f.matchesUsed).toBe(1);
+    expect(f.rawXg90).toBeLessThan(1);
+  });
+
+  it('shrinkage pulls thin samples toward the prior', () => {
+    const oneHot = [mkRow(5, { xg: 1.5, minutes: 90 })]; // 1.5 xg in one match
+    const f = computePlayerFeatures(oneHot, new Date(), 'MID');
+    expect(f.rawXg90).toBeCloseTo(1.5, 1);
+    expect(f.xg90).toBeLessThan(0.5); // shrunk hard toward the MID prior
+  });
+
+  it('empty history returns positional priors', () => {
+    const f = computePlayerFeatures([], new Date(), 'FWD');
+    expect(f.xg90).toBeGreaterThan(0.2);
+    expect(f.matchesUsed).toBe(0);
+  });
+});
+
+describe('L3 minutes model', () => {
+  const base = {
+    status: 'a',
+    chanceNext: null,
+    activeInjury: null,
+    confirmedLineup: null,
+    position: 'MID',
+    startShare5: 1,
+    minutesEwma: 88,
+    startedLast: true,
+    daysSinceLastMatch: 5,
+    congested: false,
+    newSigning: false,
+    returnedFromInjury: false,
+    fixturesAhead: 1,
+  } as const;
+
+  it('nailed starter gets high p_start', () => {
+    const p = predictMinutes({ ...base }, minutesCfg);
+    expect(p.pStart).toBeGreaterThan(0.85);
+    expect(p.pAny).toBeGreaterThanOrEqual(p.pStart);
+    expect(p.p60).toBeLessThanOrEqual(p.pStart);
+  });
+
+  it('status i/s/u/n → zero everywhere', () => {
+    for (const status of ['i', 's', 'u', 'n']) {
+      const p = predictMinutes({ ...base, status }, minutesCfg);
+      expect(p.pStart).toBe(0);
+      expect(p.eMin).toBe(0);
+    }
+  });
+
+  it('chance flags scale multiplicatively', () => {
+    const p75 = predictMinutes({ ...base, chanceNext: 75 }, minutesCfg);
+    const p25 = predictMinutes({ ...base, chanceNext: 25 }, minutesCfg);
+    expect(p75.pStart).toBeGreaterThan(p25.pStart);
+    expect(p25.pStart).toBeLessThan(0.3);
+  });
+
+  it('confirmed lineup overrides for the next fixture only', () => {
+    const inXi = predictMinutes({ ...base, startShare5: 0, minutesEwma: 0, confirmedLineup: 'xi' }, minutesCfg);
+    expect(inXi.pStart).toBe(0.99);
+    const later = predictMinutes({ ...base, startShare5: 0, minutesEwma: 0, confirmedLineup: 'xi', fixturesAhead: 2 }, minutesCfg);
+    expect(later.pStart).toBeLessThan(0.99);
+    const benched = predictMinutes({ ...base, confirmedLineup: 'bench' }, minutesCfg);
+    expect(benched.pStart).toBe(0.02);
+    expect(benched.pAny).toBeGreaterThan(0.3);
+  });
+
+  it('probabilities always in [0,1]', () => {
+    for (let i = 0; i < 100; i++) {
+      const p = predictMinutes(
+        {
+          ...base,
+          startShare5: (i % 6) / 5,
+          minutesEwma: (i * 7) % 95,
+          congested: i % 2 === 0,
+          newSigning: i % 3 === 0,
+          fixturesAhead: (i % 6) + 1,
+          chanceNext: [null, 25, 50, 75, 100][i % 5]!,
+        },
+        minutesCfg,
+      );
+      for (const v of [p.pStart, p.p60, p.pAny]) {
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+});
+
+describe('L9 composer', () => {
+  it('Jensen: expected save points computed on the distribution, not the mean', () => {
+    // E[saves]=2.9 → ⌊2.9/3⌋=0 naively, but the distribution pays
+    expect(expectedSavePoints(2.9, 3)).toBeGreaterThan(0.3);
+    expect(expectedSavePoints(0, 3)).toBe(0);
+  });
+
+  it('xPts bounded sane and componentised', () => {
+    const b = composeXpts(
+      {
+        position: 'FWD',
+        pStart: 0.95,
+        p60: 0.8,
+        pAny: 0.98,
+        eMin: 84,
+        xg90: 0.7,
+        xa90: 0.15,
+        saves90: 0,
+        yc90: 0.1,
+        rc90: 0.003,
+        defconHitRate: 0.01,
+        fixtureMultAtt: 1.2,
+        pCsTeam: 0.3,
+        eConcedePts: -0.5,
+        lambdaOpponent: 1.1,
+      },
+      rules,
+      bonusProfiles,
+    );
+    expect(b.total).toBeGreaterThan(2);
+    expect(b.total).toBeLessThan(25);
+    const sum =
+      b.appearance + b.goals + b.assists + b.cleanSheet + b.defcon + b.saves + b.bonus + b.concededPenalty + b.cards + b.ownGoalAndPenMiss;
+    expect(b.total).toBeCloseTo(Math.max(0, sum), 6);
+  });
+
+  it('GK gets save points, FWD does not; DEF gets CS 4, MID 1', () => {
+    const mk = (position: string) =>
+      composeXpts(
+        {
+          position,
+          pStart: 0.95,
+          p60: 0.9,
+          pAny: 0.97,
+          eMin: 88,
+          xg90: 0.05,
+          xa90: 0.05,
+          saves90: 3,
+          yc90: 0.1,
+          rc90: 0.003,
+          defconHitRate: 0.2,
+          fixtureMultAtt: 1,
+          pCsTeam: 0.4,
+          eConcedePts: -0.4,
+          lambdaOpponent: 1.3,
+        },
+        rules,
+        bonusProfiles,
+      );
+    expect(mk('GK').saves).toBeGreaterThan(0.5);
+    expect(mk('FWD').saves).toBe(0);
+    expect(mk('DEF').cleanSheet).toBeCloseTo(mk('MID').cleanSheet * 4, 1);
+  });
+
+  it('pointsFromStats reproduces known FPL scorelines', () => {
+    // MID: 90 min, 1 goal, 1 assist, CS, 2 bonus = 2+5+3+1+2 = 13
+    expect(
+      pointsFromStats(
+        { position: 'MID', minutes: 90, goals: 1, assists: 1, cs: true, conceded: 0, og: 0, penSaved: 0, penMissed: 0, yc: 0, rc: 0, saves: 0, bonus: 2, cbit: 4, cbirt: 8 },
+        rules,
+      ),
+    ).toBe(13);
+    // DEF: 90 min, CS, 10 CBIT (DEFCON hit), 0 bonus = 2+4+2 = 8
+    expect(
+      pointsFromStats(
+        { position: 'DEF', minutes: 90, goals: 0, assists: 0, cs: true, conceded: 0, og: 0, penSaved: 0, penMissed: 0, yc: 0, rc: 0, saves: 0, bonus: 0, cbit: 10, cbirt: 14 },
+        rules,
+      ),
+    ).toBe(8);
+    // DEFCON threshold not doubled: 20 CBIT still +2
+    expect(
+      pointsFromStats(
+        { position: 'DEF', minutes: 90, goals: 0, assists: 0, cs: false, conceded: 1, og: 0, penSaved: 0, penMissed: 0, yc: 0, rc: 0, saves: 0, bonus: 0, cbit: 20, cbirt: 25 },
+        rules,
+      ),
+    ).toBe(4); // 2 appearance + 2 defcon − 0 concession (1 goal < 2)
+    // GK: 58 min, 7 saves, pen save, conceded 4 = 1 + 2 + 5 − 2 = 6
+    expect(
+      pointsFromStats(
+        { position: 'GK', minutes: 58, goals: 0, assists: 0, cs: false, conceded: 4, og: 0, penSaved: 1, penMissed: 0, yc: 0, rc: 0, saves: 7, bonus: 0, cbit: 0, cbirt: 0 },
+        rules,
+      ),
+    ).toBe(6);
+    // 0 minutes = 0 points regardless
+    expect(
+      pointsFromStats(
+        { position: 'FWD', minutes: 0, goals: 0, assists: 0, cs: true, conceded: 0, og: 0, penSaved: 0, penMissed: 0, yc: 0, rc: 0, saves: 0, bonus: 0, cbit: 0, cbirt: 15 },
+        rules,
+      ),
+    ).toBe(0);
+  });
+});
+
+describe('resolver name traps (§1.5.1)', () => {
+  it('diacritics', () => {
+    expect(normaliseName('Ødegaard')).toBe(normaliseName('Odegaard'));
+    expect(normaliseName('Sávio')).toBe(normaliseName('Savio'));
+    expect(normaliseName('Šeško')).toBe(normaliseName('Sesko'));
+  });
+  it('token order', () => {
+    expect(normaliseName('Son Heung-min')).toBe(normaliseName('Heung-Min Son'));
+  });
+  it('hyphens and apostrophes stripped without splitting identity', () => {
+    expect(normaliseName("N'Golo Kanté")).toBe(normaliseName('NGolo Kante'));
+    expect(normaliseName('Calvert-Lewin')).toBe(normaliseName('Calvert Lewin'));
+    expect(normaliseName("O'Brien")).toBe(normaliseName('OBrien'));
+  });
+  it('trigram similarity ranks close names high', () => {
+    expect(trigramSimilarity(normaliseName('Salah'), normaliseName('M.Salah'))).toBeGreaterThan(0.5);
+    expect(trigramSimilarity(normaliseName('Haaland'), normaliseName('Watkins'))).toBeLessThan(0.3);
+  });
+});
+
+describe('optimiser', () => {
+  function market(): OptimiserCandidate[] {
+    const out: OptimiserCandidate[] = [];
+    let i = 0;
+    const add = (pos: string, n: number, priceBase: number): void => {
+      for (let k = 0; k < n; k++) {
+        out.push({
+          uid: `${pos}${k}`,
+          position: pos,
+          club: `club${i++ % 10}`,
+          price: priceBase + (k % 7) * 5,
+          xpts: 3 + ((k * 13) % 11) * 0.6,
+          pStart: 0.6 + ((k * 7) % 4) * 0.1,
+        });
+      }
+    };
+    add('GK', 20, 40);
+    add('DEF', 50, 40);
+    add('MID', 60, 45);
+    add('FWD', 30, 45);
+    return out;
+  }
+
+  const squadRules = DEFAULT_CONFIG.squad_rules as SquadRules;
+
+  it('produces a valid squad under all constraints', () => {
+    const sol = optimiseSquad(market(), squadRules);
+    expect(sol.squad).toHaveLength(15);
+    expect(sol.totalCost).toBeLessThanOrEqual(1000);
+    const posCounts: Record<string, number> = {};
+    for (const p of sol.squad) posCounts[p.position] = (posCounts[p.position] ?? 0) + 1;
+    expect(posCounts).toEqual({ GK: 2, DEF: 5, MID: 5, FWD: 3 });
+    const clubCounts: Record<string, number> = {};
+    for (const p of sol.squad) clubCounts[p.club] = (clubCounts[p.club] ?? 0) + 1;
+    expect(Math.max(...Object.values(clubCounts))).toBeLessThanOrEqual(3);
+  });
+
+  it('respects locks and bans', () => {
+    const m = market();
+    const sol = optimiseSquad(m, squadRules, { locked: ['FWD0'], banned: ['MID0'] });
+    expect(sol.squad.some((p) => p.uid === 'FWD0')).toBe(true);
+    expect(sol.squad.some((p) => p.uid === 'MID0')).toBe(false);
+  });
+
+  it('respects a tighter budget', () => {
+    const sol = optimiseSquad(market(), squadRules, { budget: 800 });
+    expect(sol.totalCost).toBeLessThanOrEqual(800);
+    expect(sol.squad).toHaveLength(15);
+  });
+
+  it('property: 25 random markets never violate constraints', () => {
+    for (let seed = 0; seed < 25; seed++) {
+      const m = market().map((c, i) => ({ ...c, xpts: ((i * seed * 17) % 90) / 10, price: 38 + ((i * seed * 7) % 100) }));
+      const sol = optimiseSquad(m, squadRules);
+      expect(sol.squad).toHaveLength(15);
+      expect(sol.totalCost).toBeLessThanOrEqual(1000);
+      const clubCounts: Record<string, number> = {};
+      for (const p of sol.squad) clubCounts[p.club] = (clubCounts[p.club] ?? 0) + 1;
+      expect(Math.max(...Object.values(clubCounts))).toBeLessThanOrEqual(3);
+    }
+  });
+});
