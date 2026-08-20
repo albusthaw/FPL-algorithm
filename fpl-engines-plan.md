@@ -1116,6 +1116,13 @@ synthetic insights, etc.
   + L12 re-rank only (no model refits) — keeps the dashboard fresh between
   full Runs without burning quota or tokens.
 
+**Hard rule (restated from `fpl-project.md` §7.0): neither fast path — nor
+any scheduled or automatic execution of any kind — ever invokes the AI
+layer.** Scheduled work is statistical only; `ai_adjustment` values simply
+carry forward from the last human-triggered Run. The run orchestrator's
+scheduled entry points are constructed without AI-gateway access so this is
+structurally impossible, not merely configured off.
+
 ## 6.6 What each frontend mode consumes (read contracts)
 
 | Mode | Reads |

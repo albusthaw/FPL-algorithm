@@ -388,6 +388,24 @@ Outputs feed all three modes as `match_insights` records per run.
 
 ## 7. AI Analysis Layer
 
+> **Authoritative spec: `fpl-ai-engine-plan.md`** — provider-by-provider API
+> contracts, the efficiency architecture (caching, batching, token
+> accounting), error handling, and the invocation gate. This section is the
+> executive summary.
+
+### 7.0 HARD RULE — AI never runs automatically
+
+**The AI layer is invoked ONLY by an explicit human action**: the Run button,
+an image-upload parse, or an explicit admin-triggered action. It is **never**
+invoked by cron/scheduled jobs, background pollers, the nightly micro-run,
+the lineup-confirmed fast path, application startup, upgrades, retries of
+failed runs, or any other automatic trigger. Scheduled jobs are statistical
+only. If a future feature wants scheduled AI, it must be a new, default-OFF,
+per-user opt-in setting that names its schedule and token cost explicitly —
+and it does not exist in v1. This rule is enforced in code (the AI gateway
+requires a `triggered_by_user_id` on every call and rejects calls from the
+scheduler context), asserted in tests, and recorded in `CLAUDE.md`.
+
 ### 7.1 Provider roster & the max-1 gate
 
 Seven providers ship behind one gateway. **Exactly one may be alive** at any
@@ -761,7 +779,8 @@ It must contain, at minimum:
    release bumps version.json."
 3. **Architecture invariants:** player UID rules (§3), max-2 API / max-1 AI
    gates enforced server-side, AI adjustment bounds, token ledger atomicity,
-   no secrets to frontend.
+   no secrets to frontend, and **AI is never invoked automatically — only by
+   explicit human action (§7.0); scheduled jobs are statistical only.**
 4. **Engines contract:** "any work on ingestion, the statistical engine, or
    the match engine follows `fpl-engines-plan.md` — layer boundaries,
    snapshot isolation, leakage rules, and acceptance gates are
