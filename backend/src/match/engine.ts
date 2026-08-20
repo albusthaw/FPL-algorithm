@@ -1,0 +1,409 @@
+/**
+ * Match Engine (fpl-engines-plan.md Part 5): fixture leverage, match
+ * compatibility index, players-to-target, captaincy pool, coverage/gaps,
+ * DGW/BGW, fixture swings, chip-window scoring under the 2026/27 two-set
+ * rules. Reads only run-stamped predictions from the SAME run_id; writes
+ * run-stamped insights, append-only.
+ */
+import type { Knex } from 'knex';
+import { getConfig } from '../core/model-config.js';
+import { log } from '../core/logger.js';
+
+interface MatchEngineConfig {
+  leverage_window_events: number;
+  target_list_size: number;
+  captaincy_pool_size: number;
+  coverage_window_events: number;
+  dgw_projection_events: number;
+  differential_ownership_max: number;
+  swing_threshold: number;
+  chip_urgency_events: number;
+  wc_horizon_events: number;
+}
+
+interface ChipRules {
+  sets: { set: number; start_event: number; stop_event: number; chips: string[] }[];
+}
+
+export interface MatchEngineResult {
+  insights: number;
+  targets: number;
+  chipRecs: number;
+  coverageReports: number;
+}
+
+export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngineResult> {
+  const cfg = await getConfig<MatchEngineConfig>(db, 'match_engine');
+  const chipRules = await getConfig<ChipRules>(db, 'chip_rules');
+
+  const fxPreds = await db('fixture_predictions as fp')
+    .join('fixtures as f', 'f.fixture_uid', 'fp.fixture_uid')
+    .where('fp.run_id', runId)
+    .select(
+      'fp.*',
+      'f.home_team_uid',
+      'f.away_team_uid',
+      'f.kickoff_utc',
+      'f.state',
+    );
+  if (fxPreds.length === 0) return { insights: 0, targets: 0, chipRecs: 0, coverageReports: 0 };
+
+  const events = [...new Set(fxPreds.map((f) => f.event as number))].sort((a, b) => a - b);
+  const windowEvents = events.slice(0, cfg.leverage_window_events);
+
+  // volatility flags: teams touched by unscheduled fixtures
+  const unscheduled = await db('fixtures').where('state', 'postponed').select('home_team_uid', 'away_team_uid');
+  const volatileTeams = new Set(unscheduled.flatMap((f) => [f.home_team_uid, f.away_team_uid]));
+
+  // matrix for star density + targets
+  const matrix = await db('player_matrix as pm')
+    .join('players as p', 'p.uid', 'pm.player_uid')
+    .where('pm.run_id', runId)
+    .select('pm.player_uid', 'pm.overall_score', 'pm.stat_score', 'pm.p_start_xi', 'pm.selected_by_pct', 'pm.price', 'p.position', 'p.team_uid', 'p.web_name');
+  const playersByTeam = new Map<string, typeof matrix>();
+  for (const m of matrix) {
+    (playersByTeam.get(m.team_uid) ?? playersByTeam.set(m.team_uid, []).get(m.team_uid)!).push(m);
+  }
+  const topDecileScore = quantile(matrix.map((m) => Number(m.overall_score)), 0.9);
+
+  const pfp = await db('player_fixture_predictions').where('run_id', runId);
+  const pfpByFixture = new Map<string, typeof pfp>();
+  const pfpByPlayer = new Map<string, typeof pfp>();
+  for (const row of pfp) {
+    (pfpByFixture.get(row.fixture_uid) ?? pfpByFixture.set(row.fixture_uid, []).get(row.fixture_uid)!).push(row);
+    (pfpByPlayer.get(row.player_uid) ?? pfpByPlayer.set(row.player_uid, []).get(row.player_uid)!).push(row);
+  }
+  const playerMeta = new Map(matrix.map((m) => [m.player_uid, m]));
+
+  // ── leverage percentiles over the window
+  const windowFx = fxPreds.filter((f) => windowEvents.includes(f.event));
+  const attVals: number[] = [];
+  const defVals: number[] = [];
+  for (const f of windowFx) {
+    attVals.push(Number(f.fdr_att_home), Number(f.fdr_att_away));
+    defVals.push(Number(f.fdr_def_home), Number(f.fdr_def_away));
+  }
+
+  let insightsCount = 0;
+  const insightRows: Record<string, unknown>[] = [];
+  const sideLeverage = new Map<string, { att: number; def: number; mci: number; event: number; teamUid: string; oppUid: string; fixtureUid: string }>();
+
+  for (const f of windowFx) {
+    for (const side of ['home', 'away'] as const) {
+      const teamUid = side === 'home' ? f.home_team_uid : f.away_team_uid;
+      const oppUid = side === 'home' ? f.away_team_uid : f.home_team_uid;
+      const att = Number(side === 'home' ? f.fdr_att_home : f.fdr_att_away);
+      const def = Number(side === 'home' ? f.fdr_def_home : f.fdr_def_away);
+      const teamPlayers = playersByTeam.get(teamUid) ?? [];
+      const starDensity = teamPlayers.filter(
+        (p) => Number(p.overall_score) >= topDecileScore && Number(p.p_start_xi) >= 0.6,
+      ).length;
+      const mci = 0.5 * att + 0.3 * def + 0.2 * Math.min(10, starDensity * 2.5);
+      const volatility = volatileTeams.has(teamUid) || volatileTeams.has(oppUid);
+      const reasons = {
+        att_leverage: r2(att),
+        def_leverage: r2(def),
+        star_density: starDensity,
+        dominant: att >= def ? 'attacking' : 'clean_sheet',
+        volatility,
+      };
+      insightRows.push({
+        run_id: runId,
+        fixture_uid: f.fixture_uid,
+        event: f.event,
+        side,
+        att_leverage: att.toFixed(2),
+        def_leverage: def.toFixed(2),
+        mci: Math.min(10, mci).toFixed(2),
+        star_density: starDensity,
+        volatility,
+        reasons: JSON.stringify(reasons),
+      });
+      sideLeverage.set(`${f.fixture_uid}|${teamUid}`, { att, def, mci, event: f.event, teamUid, oppUid, fixtureUid: f.fixture_uid });
+      insightsCount++;
+    }
+  }
+  for (let i = 0; i < insightRows.length; i += 500) {
+    await db('match_insights').insert(insightRows.slice(i, i + 500)).onConflict(['run_id', 'fixture_uid', 'side']).merge();
+  }
+
+  // ── target lists
+  let targetCount = 0;
+  const targetRows: Record<string, unknown>[] = [];
+  const nextEvent = events[0]!;
+
+  // per high-leverage fixture-side: top-N by xpts_this_fixture · p_start
+  const sortedSides = [...sideLeverage.values()].sort((a, b) => Math.max(b.att, b.def) - Math.max(a.att, a.def));
+  const highLeverage = sortedSides.filter((s) => Math.max(s.att, s.def) >= 7).slice(0, 12);
+  const globalCandidates = new Map<string, { score: number; reasons: Record<string, unknown>; event: number; fixtureUid: string }>();
+
+  for (const s of highLeverage) {
+    const fixturePfp = (pfpByFixture.get(s.fixtureUid) ?? []).filter((row) => {
+      const meta = playerMeta.get(row.player_uid);
+      return meta && meta.team_uid === s.teamUid;
+    });
+    const scoredPlayers = fixturePfp
+      .map((row) => ({
+        row,
+        meta: playerMeta.get(row.player_uid)!,
+        score: Number(row.xpts) * Number(row.p_start),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, cfg.target_list_size);
+    let rank = 1;
+    for (const t of scoredPlayers) {
+      const reasons = {
+        xpts: r2(Number(t.row.xpts)),
+        p_start: r2(Number(t.row.p_start)),
+        leverage: r2(Math.max(s.att, s.def)),
+        kind: s.att >= s.def ? 'attacking_fixture' : 'clean_sheet_fixture',
+      };
+      targetRows.push({
+        run_id: runId,
+        event: s.event,
+        scope: 'fixture',
+        fixture_uid: s.fixtureUid,
+        player_uid: t.row.player_uid,
+        rank: rank++,
+        score: t.score.toFixed(3),
+        reasons: JSON.stringify(reasons),
+      });
+      targetCount++;
+      const existing = globalCandidates.get(t.row.player_uid);
+      if (!existing || existing.score < t.score) {
+        globalCandidates.set(t.row.player_uid, { score: t.score, reasons, event: s.event, fixtureUid: s.fixtureUid });
+      }
+    }
+  }
+
+  // global per-GW list = union, deduped, re-ranked
+  const globalSorted = [...globalCandidates.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, 20);
+  globalSorted.forEach(([uid, g], idx) => {
+    targetRows.push({
+      run_id: runId,
+      event: g.event,
+      scope: 'global',
+      fixture_uid: g.fixtureUid,
+      player_uid: uid,
+      rank: idx + 1,
+      score: g.score.toFixed(3),
+      reasons: JSON.stringify(g.reasons),
+    });
+    targetCount++;
+  });
+
+  // differential variant: ownership < ⚙10%, ranked by xpts·p_start·(1−own%)
+  const diffSorted = [...globalCandidates.entries()]
+    .filter(([uid]) => Number(playerMeta.get(uid)?.selected_by_pct ?? 100) < cfg.differential_ownership_max)
+    .map(([uid, g]) => ({ uid, g, score: g.score * (1 - Number(playerMeta.get(uid)!.selected_by_pct) / 100) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+  diffSorted.forEach((d, idx) => {
+    targetRows.push({
+      run_id: runId,
+      event: d.g.event,
+      scope: 'differential',
+      fixture_uid: d.g.fixtureUid,
+      player_uid: d.uid,
+      rank: idx + 1,
+      score: d.score.toFixed(3),
+      reasons: JSON.stringify({ ...d.g.reasons, ownership: Number(playerMeta.get(d.uid)!.selected_by_pct) }),
+    });
+    targetCount++;
+  });
+
+  // captaincy pool: top-N by 2·xpts_next1 with ceiling (xpts + 1.28σ)
+  const nextEventXpts = new Map<string, { xpts: number; sigma: number }>();
+  for (const row of pfp) {
+    if (row.event !== nextEvent) continue;
+    const cur = nextEventXpts.get(row.player_uid) ?? { xpts: 0, sigma: 0 };
+    cur.xpts += Number(row.xpts);
+    cur.sigma = Math.sqrt(cur.sigma ** 2 + Number(row.variance));
+    nextEventXpts.set(row.player_uid, cur);
+  }
+  const captaincy = [...nextEventXpts.entries()]
+    .map(([uid, v]) => ({ uid, doubled: 2 * v.xpts, ceiling: 2 * (v.xpts + 1.28 * v.sigma) }))
+    .sort((a, b) => b.doubled - a.doubled)
+    .slice(0, cfg.captaincy_pool_size);
+  captaincy.forEach((c, idx) => {
+    targetRows.push({
+      run_id: runId,
+      event: nextEvent,
+      scope: 'captaincy',
+      fixture_uid: null,
+      player_uid: c.uid,
+      rank: idx + 1,
+      score: c.doubled.toFixed(3),
+      reasons: JSON.stringify({ doubled_xpts: r2(c.doubled), ceiling: r2(c.ceiling), label: idx === 0 ? 'safe_pick' : c.ceiling > (captaincy[0]?.ceiling ?? 0) ? 'ceiling_pick' : 'alternative' }),
+    });
+    targetCount++;
+  });
+
+  for (let i = 0; i < targetRows.length; i += 500) {
+    await db('target_lists').insert(targetRows.slice(i, i + 500));
+  }
+
+  // ── DGW/BGW detection over the projection window (pure counting)
+  const allFixtures = await db('fixtures')
+    .whereIn('event', events.slice(0, cfg.dgw_projection_events))
+    .select('event', 'home_team_uid', 'away_team_uid');
+  const fixtureCounts = new Map<string, number>(); // `${event}|${team}`
+  for (const f of allFixtures) {
+    for (const t of [f.home_team_uid, f.away_team_uid]) {
+      const key = `${f.event}|${t}`;
+      fixtureCounts.set(key, (fixtureCounts.get(key) ?? 0) + 1);
+    }
+  }
+  const teams = [...playersByTeam.keys()];
+  const dgwByEvent = new Map<number, string[]>();
+  const bgwByEvent = new Map<number, string[]>();
+  for (const ev of events.slice(0, cfg.dgw_projection_events)) {
+    for (const t of teams) {
+      const n = fixtureCounts.get(`${ev}|${t}`) ?? 0;
+      if (n >= 2) (dgwByEvent.get(ev) ?? dgwByEvent.set(ev, []).get(ev)!).push(t);
+      if (n === 0) (bgwByEvent.get(ev) ?? bgwByEvent.set(ev, []).get(ev)!).push(t);
+    }
+  }
+
+  // ── per-team chip-window scoring + coverage for every saved team
+  const userTeams = await db('user_teams').select('id', 'user_id', 'bank', 'chips_used');
+  const teamPlayers = await db('user_team_players').select('team_id', 'player_uid');
+  const playersByUserTeam = new Map<number, string[]>();
+  for (const tp of teamPlayers) {
+    (playersByUserTeam.get(tp.team_id) ?? playersByUserTeam.set(tp.team_id, []).get(tp.team_id)!).push(tp.player_uid);
+  }
+
+  // team xpts per event helper
+  const xptsForEvent = (uids: string[], ev: number): number => {
+    let sum = 0;
+    for (const uid of uids) {
+      for (const row of pfpByPlayer.get(uid) ?? []) if (row.event === ev) sum += Number(row.xpts);
+    }
+    return sum;
+  };
+
+  // benchmark: best-20-players xpts per event (cheap optimal-squad proxy for FH value)
+  const bestXptsPerEvent = new Map<number, number>();
+  for (const ev of events) {
+    const perPlayer = new Map<string, number>();
+    for (const row of pfp) {
+      if (row.event !== ev) continue;
+      perPlayer.set(row.player_uid, (perPlayer.get(row.player_uid) ?? 0) + Number(row.xpts));
+    }
+    const top11 = [...perPlayer.values()].sort((a, b) => b - a).slice(0, 11);
+    bestXptsPerEvent.set(ev, top11.reduce((a, b) => a + b, 0));
+  }
+
+  let chipCount = 0;
+  let coverageCount = 0;
+
+  for (const team of userTeams) {
+    const uids = playersByUserTeam.get(team.id) ?? [];
+    if (uids.length === 0) continue;
+
+    // coverage: exposure to top-quartile leverage fixture-sides in the window
+    const coverageWindow = events.slice(0, cfg.coverage_window_events);
+    const windowSides = [...sideLeverage.values()].filter((s) => coverageWindow.includes(s.event));
+    const leverageThreshold = quantile(windowSides.map((s) => Math.max(s.att, s.def)), 0.75);
+    const gaps: Record<string, unknown>[] = [];
+    let coverage = 0;
+    for (const s of windowSides) {
+      if (Math.max(s.att, s.def) < leverageThreshold) continue;
+      const isAttacking = s.att >= s.def;
+      const exposure = uids.filter((uid) => {
+        const meta = playerMeta.get(uid);
+        if (!meta || meta.team_uid !== s.teamUid) return false;
+        if (Number(meta.p_start_xi) < 0.5) return false;
+        return isAttacking ? ['MID', 'FWD'].includes(meta.position) : ['GK', 'DEF'].includes(meta.position);
+      }).length;
+      coverage += exposure;
+      if (exposure === 0) {
+        gaps.push({
+          event: s.event,
+          fixture_uid: s.fixtureUid,
+          team_uid: s.teamUid,
+          kind: isAttacking ? 'attacking' : 'clean_sheet',
+          leverage: r2(Math.max(s.att, s.def)),
+        });
+      }
+    }
+    await db('coverage_reports')
+      .insert({
+        run_id: runId,
+        team_id: team.id,
+        window_events: cfg.coverage_window_events,
+        coverage_score: coverage.toFixed(2),
+        gaps: JSON.stringify(gaps),
+      })
+      .onConflict(['run_id', 'team_id'])
+      .merge();
+    coverageCount++;
+
+    // chip-window scoring under set expiry
+    const chipsUsed = new Set<string>((team.chips_used ?? []).map((c: { chip: string; set: number }) => `${c.chip}:${c.set}`));
+    const chipRows: Record<string, unknown>[] = [];
+    for (const set of chipRules.sets) {
+      const setEvents = events.filter((ev) => ev >= set.start_event && ev <= set.stop_event);
+      if (setEvents.length === 0) continue;
+      for (const chip of set.chips) {
+        if (chipsUsed.has(`${chip}:${set.set}`)) continue;
+        let best: { event: number; value: number } | null = null;
+        for (const ev of setEvents) {
+          let value = 0;
+          if (chip === 'freehit') {
+            value = (bestXptsPerEvent.get(ev) ?? 0) - xptsForEvent(uids, ev);
+          } else if (chip === 'wildcard') {
+            const horizon = setEvents.filter((e) => e >= ev).slice(0, cfg.wc_horizon_events);
+            for (const e of horizon) value += ((bestXptsPerEvent.get(e) ?? 0) - xptsForEvent(uids, e)) * 0.35;
+          } else if (chip === 'bboost') {
+            // bench value proxy: 4 weakest squad players' xpts (peaks in DGWs)
+            const perPlayer = uids
+              .map((uid) => ({ uid, x: (pfpByPlayer.get(uid) ?? []).filter((r) => r.event === ev).reduce((s, r) => s + Number(r.xpts), 0) }))
+              .sort((a, b) => a.x - b.x);
+            value = perPlayer.slice(0, 4).reduce((s, p) => s + p.x, 0);
+          } else if (chip === '3xc') {
+            const perPlayer = uids.map((uid) => (pfpByPlayer.get(uid) ?? []).filter((r) => r.event === ev).reduce((s, r) => s + Number(r.xpts), 0));
+            value = Math.max(0, ...perPlayer); // extra captain multiplier value
+          }
+          const dgwBonus = (dgwByEvent.get(ev) ?? []).filter((t) => uids.some((uid) => playerMeta.get(uid)?.team_uid === t)).length;
+          value += chip === 'bboost' || chip === '3xc' ? dgwBonus * 1.5 : 0;
+          if (!best || value > best.value) best = { event: ev, value };
+        }
+        if (!best) continue;
+        // urgency: unused set chips approaching expiry
+        const eventsLeft = set.stop_event - (events[0] ?? set.start_event);
+        const urgency = eventsLeft <= cfg.chip_urgency_events ? cfg.chip_urgency_events - eventsLeft + 1 : 0;
+        const caveats: string[] = [];
+        const volatileEvent = windowFx.some((f) => f.event === best.event && (volatileTeams.has(f.home_team_uid) || volatileTeams.has(f.away_team_uid)));
+        if (volatileEvent) caveats.push('fixtures in this event may still move (unscheduled matches)');
+        if ((bgwByEvent.get(best.event) ?? []).length > 0 && chip === 'freehit') caveats.push('blank gameweek detected — strong Free Hit signal');
+        chipRows.push({
+          run_id: runId,
+          team_id: team.id,
+          chip,
+          chip_set: set.set,
+          event: best.event,
+          value: best.value.toFixed(3),
+          urgency,
+          caveats: JSON.stringify(caveats),
+        });
+        chipCount++;
+      }
+    }
+    if (chipRows.length > 0) await db('chip_recommendations').insert(chipRows);
+  }
+
+  log.info({ runId, insights: insightsCount, targets: targetCount, chips: chipCount }, 'match engine complete');
+  return { insights: insightsCount, targets: targetCount, chipRecs: chipCount, coverageReports: coverageCount };
+}
+
+function quantile(values: number[], q: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(q * sorted.length)));
+  return sorted[idx]!;
+}
+
+function r2(x: number): number {
+  return Number(x.toFixed(2));
+}
