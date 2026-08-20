@@ -6,6 +6,8 @@
 - `theme.html` — visual/design inspiration. Its design language (editorial layout, glass buttons, glass chips, glass input groups, mono kickers, serif display type) MUST be carried into `CLAUDE.md` so every build session follows it.
 - `howupgradeshouldwork-1.md` — the release/upgrade architecture that `install.sh`, `upgrade.sh`, and `reinstall.sh` MUST implement exactly.
 - `fpl-engines-plan.md` — **authoritative deep build spec** for the Statistical Engine and Match Engine: exact data sources & endpoint field references, interpretation guide, the ingestion→UID pipeline, all twelve model layers, integration DAG, and per-package acceptance gates. §5 and §6 below are the summaries; that document is the implementation contract.
+- `fpl-api-integration-plan.md` — **authoritative integration spec for the football data providers**: per-provider dossiers (verified auth, limits, endpoint shapes, error behaviours incl. errors-inside-HTTP-200, ID systems), the cross-cutting anti-bug framework (error taxonomy, DB write hardening, UID-mapping hardening), the provider pairing strategy by budget, and the build-time probe protocol. §4 below is the summary.
+- `fpl-ai-engine-plan.md` — **authoritative spec for the AI layer**: the human-only invocation gate, all seven provider adapter contracts (structured output, caching, usage fields), the token-efficiency architecture (cache-aware prompt layout, batch planning, verdict cache, exact accounting), validation, vision, and testing. §7 below is the summary.
 
 ---
 
@@ -81,6 +83,8 @@ Repository layout:
 fpl-algorithm/
 ├── CLAUDE.md                  # build rules: theme, conventions, upgrade rules (see §12, §14)
 ├── fpl-engines-plan.md        # deep build spec for statistical + match engines (authoritative)
+├── fpl-api-integration-plan.md# provider dossiers + anti-bug adapter framework (authoritative)
+├── fpl-ai-engine-plan.md      # AI engine: gating, 7 provider contracts, efficiency (authoritative)
 ├── version.json               # { "version": "x.y.z", "schema": N }
 ├── backend/
 │   ├── src/
@@ -216,14 +220,20 @@ moment** (enabling a third from the admin UI forces the user to pick one to
 disable first — enforced again server-side with a transactional check, never
 trust the UI).
 
-| # | Provider | Tier | What we take from it | Notes |
+| # | Provider | Tier (verified — see `fpl-api-integration-plan.md`) | What we take from it | Notes |
 |---|---|---|---|---|
-| 1 | **API-Football (api-sports.io)** | Free 100 req/day; paid from ~$25/mo | injuries endpoint, lineups (predicted + confirmed), fixtures, player stats, odds | Best injury + lineup coverage; v3 REST |
-| 2 | **Sportmonks Football API** | Free plan (limited leagues); paid tiers | xG, lineups, `sidelined` entity (injuries/suspensions with expected return), predictions, odds | Deep includes system; 24/7 verified data |
-| 3 | **football-data.org** | Free 10 req/min (PL included) | fixtures, results, standings, scorers | Great free fallback for fixtures/results |
-| 4 | **NewsData.io / NewsAPI.org** (news class) | Free dev tier; paid for volume | football news articles (injury rumours, press-conference quotes, transfer news) filtered by PL keywords | This is the *news* feed the AI reads |
-| 5 | **TheSportsDB** | Free (patreon key for more) | team/player metadata, badges/photos, events | Cheap enrichment + media assets |
-| 6 | **Understat** (stretch, unofficial) | Free | shot-level xG history | No formal API — scraper adapter, clearly flagged as fragile |
+| 1 | **API-Football (api-sports.io)** | Free 100 req/day **but free tier excludes the current season** (rolling past-seasons window only) → live use needs Pro (~$29/mo class, 7,500/day + 300/min) | injuries endpoint, lineups (measured: land T−29 to T−18 before kickoff), fixtures, player stats, odds | Best injury + lineup coverage; v3 REST; **returns errors inside HTTP 200** — see dossier §2.2 |
+| 2 | **Sportmonks Football API** | Free plan is Danish + Scottish leagues only — **EPL requires Standard+ (paid)**; xG Standard+; predictions add-on | xG, lineups, `sidelined` entity (injury/suspension periods with return dates) | Includes system, cursor pagination, per-entity 3000/h rate buckets — dossier §2.3 |
+| 3 | **football-data.org** | Free 10 req/min (PL included) | fixtures, results, standings | Best free fixtures/results fallback — dossier §2.4 |
+| 4 | **NewsData.io / NewsAPI.org** (news class) | NewsData.io free credits/day (default news provider); **NewsAPI.org free is dev-only with 24 h article delay** — alternate for paid deployments | football news articles (injury rumours, press-conference quotes, transfer news) filtered by PL keywords | This is the *news* feed the AI reads — dossier §2.5 |
+| 5 | **TheSportsDB** | Free demo throttled ~30/min; Patreon $9/mo for production key + v2 API (~100/min, hard 2 req/s) | team/player metadata, badges/photos, player cutouts for the pitch view | Metadata/media only, never stats truth — dossier §2.6 |
+| 6 | **Understat** (stretch, unofficial) | Free (scrape) | shot-level xG history, xGChain/xGBuildup, PPDA | No formal API — scraper adapter, ships disabled — dossier §2.7 |
+
+**Default enabled pair by budget** (full reasoning in
+`fpl-api-integration-plan.md` Part 3): free-only → football-data.org +
+NewsData.io (minutes model runs statistical-only); recommended →
+**API-Football Pro + NewsData.io**; premium options trade the news slot and
+are an explicit admin decision the switch UI explains.
 
 Provider adapter contract (every adapter must implement):
 
@@ -786,10 +796,19 @@ It must contain, at minimum:
    snapshot isolation, leakage rules, and acceptance gates are
    non-negotiable; config values marked ⚙ live in `model_config`, never in
    code."
-5. **Version policy:** latest stable majors, pinned (Node 26 / PostgreSQL 18
+5. **Integration contract:** "any provider adapter work follows
+   `fpl-api-integration-plan.md` — the five laws of the ingest layer, the
+   error taxonomy, DB write hardening, UID-mapping hardening, and the
+   adapter Definition of Done (§1.6) apply to every adapter, football and
+   AI alike; no adapter ships without its probe script passing."
+6. **AI engine contract:** "any AI-layer work follows
+   `fpl-ai-engine-plan.md` — human-only invocation, the cache-aware prompt
+   layout, single-repair-retry validation, and exact per-provider usage
+   accounting are non-negotiable."
+7. **Version policy:** latest stable majors, pinned (Node 26 / PostgreSQL 18
    / Fastify 5 / React 19 / Vite 7 at time of writing); runtime checks per
    §2.
-6. **Definition of done:** typecheck + tests + Playwright responsive
+8. **Definition of done:** typecheck + tests + Playwright responsive
    screenshots green; no page with horizontal overflow.
 
 ---
@@ -800,10 +819,10 @@ It must contain, at minimum:
 |---|---|---|
 | **0. Foundations** (wk 1–2) | Repo scaffold, CLAUDE.md, version.json, migrations 0001–0002, auth + sessions + admin bootstrap, `scripts/lib.sh` + first `install.sh`, CI (typecheck/test/lint) | install.sh brings up a login-gated empty app on a clean VM |
 | **1. Player DB + FPL anchor** (wk 2–4) | FPL official API ingest, player registry + UID + identity mapping, players table UI, cron polling | Full PL player list with live prices/status, zero duplicate players |
-| **2. Ingest gateway + 2 providers** (wk 4–7) | API analysis docs (§4.4) for all 5+, gateway with max-2 switch + quota log + circuit breaker, adapters #1 API-Football & #4 news provider; admin API-switch UI | Injuries + news flowing in, mapped to UIDs; third-enable correctly refused |
+| **2. Ingest gateway + 2 providers** (wk 4–7) | Anti-bug adapter framework + probe protocol per `fpl-api-integration-plan.md` (Parts 1 & 4), gateway with max-2 switch + entitlement learning + quota log + circuit breaker, adapters #1 API-Football & #4 news provider; pre-season UID mapping sprint; admin API-switch UI with the pairing table | Injuries + news flowing in, mapped to UIDs; adapter Definition of Done (§1.6 of that plan) met for both adapters; third-enable correctly refused |
 | **3. Statistical engine** (wk 7–11) | Work packages E1–E8 of `fpl-engines-plan.md` Part 7: ingestion→UID pipeline, historical import + feature factory, Dixon-Coles + odds blend, minutes model, production models, xPts composer, backtest harness, stat_score/matrix | E-package exit criteria in the engines plan; backtest beats naive + FPL `ep_next` benchmarks; calibration plots acceptable; matrix visible in player detail |
 | **4. Match engine** (wk 11–12) | Work packages E9–E10: fixture leverage, players-to-target, coverage/gaps, DGW/BGW, chip-window scoring (two-set 26/27 rules), integration DAG + fast paths | E9/E10 exit criteria; match_insights per GW rendering in UI; lineup-confirmed mini-run < 30 s |
-| **5. AI layer + Run** (wk 12–16) | AI gateway max-1 + all 7 adapters, structured verdicts, token ledger + estimates + warnings, exclusion list, caching, Run Orchestrator + SSE run screen | Full run: news → AI → stats → re-rank with accurate token report; Ollama path works offline |
+| **5. AI layer + Run** (wk 12–16) | Work packages A1–A7 of `fpl-ai-engine-plan.md`: engine skeleton + MockProvider first, then the 7 adapters, BatchPlanner, verdict cache, cache-aware prompts, exact accounting, Run Orchestrator + SSE run screen | A-package exit criteria; full run: news → AI → stats → re-rank with accurate token report; Ollama path works offline; scheduler provably cannot invoke AI |
 | **6. FPL engine + 3 modes** (wk 16–20) | Rules model, optimiser, transfer suggester, team valuation; Initial / FH-WC / Weekly pages | Optimiser produces valid squads under all constraints (property tests); all 3 modes usable end-to-end |
 | **7. Your Teams + vision** (wk 20–22) | Unlimited teams, pitch view, image upload pipeline + confirmation screen, sync-from-image in all modes | Screenshot of a real FPL team parses to a confirmed 15-man squad |
 | **8. Admin + polish** (wk 22–24) | Full admin panel (tokens, switches, weights, logs, charts) in the glass theme; responsive QA sweep; remaining provider adapters (#2/#3/#5) | Playwright responsive suite green on every page at 5 widths |

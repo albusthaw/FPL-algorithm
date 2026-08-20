@@ -46,6 +46,15 @@ Rules of engagement (restate from `fpl-project.md` §4): S1 is always on and
 not counted by the max-2 provider switch; S2–S6 are adapters behind the
 gateway; S7 is an offline import script, not a runtime provider.
 
+> **Integration mechanics live in `fpl-api-integration-plan.md`** — verified
+> per-provider dossiers (auth, exact limits, error behaviours, ID systems,
+> quirks), the anti-bug adapter framework, and the probe protocol. Key tier
+> corrections established there: API-Football's free tier cannot access the
+> current season (live use needs Pro); Sportmonks' free plan has no EPL
+> (Standard+ required); NewsAPI.org's free tier is dev-only with a 24 h
+> delay (NewsData.io is the default news provider). The polling schedule in
+> §1.5 assumes the recommended paid pairing from that document's Part 3.
+
 **Why this mix:** the peer-reviewed OpenFPL work demonstrated that FPL API +
 Understat features alone reach commercial-grade point-forecast accuracy, but
 its stated #1 limitation is the absence of expected-minutes/lineup
