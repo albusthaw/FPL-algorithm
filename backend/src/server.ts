@@ -91,7 +91,16 @@ async function main(): Promise<void> {
   startScheduler(defaultDb);
 }
 
-const isMain = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+// realpath both sides: the service invokes via the `current` symlink while
+// Node realpaths the main module URL — a plain string compare would miss
+const isMain = ((): boolean => {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname);
+  } catch {
+    return false;
+  }
+})();
 if (isMain || process.env.FPL_SERVER_AUTOSTART === 'true') {
   main().catch((err) => {
     log.fatal({ err: err instanceof Error ? err.stack : err }, 'server failed to start');

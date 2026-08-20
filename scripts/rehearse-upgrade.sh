@@ -16,6 +16,9 @@ NEW_ZIP="${2:-}"
 REHEARSAL_ROOT="$(mktemp -d /tmp/fpl-rehearsal-XXXXXX)"
 export APP_DIR="${REHEARSAL_ROOT}/opt"
 export DB_NAME_OVERRIDE="fpl_rehearsal_$$"
+# isolated role too — reusing the production role name would let install.sh
+# reset the real role's password from inside a rehearsal
+export DB_USER_OVERRIDE="fpl_rhrsl_$$"
 export APP_PORT="$((3200 + RANDOM % 500))"
 export LOG_DIR="${REHEARSAL_ROOT}/logs"
 export NO_SYSTEMD=true
@@ -30,6 +33,7 @@ cleanup() {
     sudo -u postgres psql -c "SELECT format('DROP DATABASE %I', datname) FROM pg_database WHERE datname LIKE '${DB_NAME_OVERRIDE}_parked%'" -tA 2>/dev/null | while read -r stmt; do
       sudo -u postgres psql -c "${stmt}" >/dev/null 2>&1 || true
     done
+    sudo -u postgres psql -c "DROP ROLE IF EXISTS ${DB_USER_OVERRIDE}" >/dev/null 2>&1 || true
   fi
   rm -rf "${REHEARSAL_ROOT}"
 }
@@ -52,7 +56,7 @@ echo ""
 echo "── 2. seed a marker row (user data must survive the upgrade)"
 MARKER="rehearsal-marker-$$"
 DB_PASSWORD_VALUE="$(grep '^DB_PASSWORD=' "${APP_DIR}/shared/.env" | cut -d= -f2)"
-PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U fpl -d "${DB_NAME_OVERRIDE}" -c \
+PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U "${DB_USER_OVERRIDE}" -d "${DB_NAME_OVERRIDE}" -c \
   "INSERT INTO feature_states (name, enabled, manifest) VALUES ('${MARKER}', true, '{}') ON CONFLICT DO NOTHING" >/dev/null
 
 if [ -n "${NEW_ZIP}" ]; then
@@ -73,7 +77,7 @@ if [ -n "${NEW_ZIP}" ]; then
   [ "${DB_AHEAD}" = "false" ] || { echo "FAIL: dbAhead"; exit 1; }
   [ "${PENDING}" = "0" ] || { echo "FAIL: pending migrations"; exit 1; }
   [ "$(readlink -f "${APP_DIR}/current")" = "$(readlink -f "${APP_DIR}/releases/${NEW_VERSION}")" ] || { echo "FAIL: symlink"; exit 1; }
-  MARKER_OK="$(PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U fpl -d "${DB_NAME_OVERRIDE}" -tAc "SELECT count(*) FROM feature_states WHERE name='${MARKER}'")"
+  MARKER_OK="$(PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U "${DB_USER_OVERRIDE}" -d "${DB_NAME_OVERRIDE}" -tAc "SELECT count(*) FROM feature_states WHERE name='${MARKER}'")"
   [ "${MARKER_OK}" = "1" ] || { echo "FAIL: user data lost in upgrade"; exit 1; }
   echo "   user data survived ✓ · symlink flipped ✓"
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.1 — 2026-08-20 · schema 8
+
+- Migration 0008: hot-path indexes (news recency, verdict cache by player,
+  ai_calls listing, player_match_stats by fixture). Purely additive.
+
 ## v1.0.0 — 2026-08-20 · schema 7
 
 Initial release. Migrations 0001–0007.

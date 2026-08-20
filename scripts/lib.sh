@@ -126,8 +126,9 @@ service_start() {
   if have_systemd; then
     systemctl start "${SERVICE_NAME}"
   else
-    (cd "${APP_DIR}/current/backend" && \
-      ENV_FILE="${APP_DIR}/shared/.env" nohup node dist/src/server.js \
+    # absolute path: service_stop's pkill matches on it — a relative path
+    # would leave the old server holding the port across an upgrade flip
+    (ENV_FILE="${APP_DIR}/shared/.env" nohup node "${APP_DIR}/current/backend/dist/src/server.js" \
       >>"${APP_DIR}/shared/data/logs/server.log" 2>&1 &)
   fi
 }
