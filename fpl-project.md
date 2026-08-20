@@ -5,6 +5,7 @@
 **Companion documents:**
 - `theme.html` — visual/design inspiration. Its design language (editorial layout, glass buttons, glass chips, glass input groups, mono kickers, serif display type) MUST be carried into `CLAUDE.md` so every build session follows it.
 - `howupgradeshouldwork-1.md` — the release/upgrade architecture that `install.sh`, `upgrade.sh`, and `reinstall.sh` MUST implement exactly.
+- `fpl-engines-plan.md` — **authoritative deep build spec** for the Statistical Engine and Match Engine: exact data sources & endpoint field references, interpretation guide, the ingestion→UID pipeline, all twelve model layers, integration DAG, and per-package acceptance gates. §5 and §6 below are the summaries; that document is the implementation contract.
 
 ---
 
@@ -54,22 +55,32 @@ tokens; only admins can top up tokens), fully mobile-responsive, and installed
                               PostgreSQL 16 (+ Knex migrations)
 ```
 
-**Stack decision (fixed):**
+**Stack decision (latest stable, pinned):**
 
 | Layer | Choice | Why |
 |---|---|---|
-| Backend | Node.js 22 LTS + TypeScript + Fastify | Matches the upgrade architecture in `howupgradeshouldwork-1.md` (Node/TS project), fast, typed |
-| DB | PostgreSQL 16 + Knex migrations | The upgrade doc's backup/restore/migration machinery is built around `pg_dump`/`pg_restore` |
-| Frontend | React 18 + Vite + TypeScript | SPA served from `frontend/dist` per the release layout |
+| Backend | **Node.js 26** (26.x — Current line, enters LTS Oct 2026) + TypeScript 5.x latest + **Fastify 5** | Latest runtime per project requirement; native `Temporal` API for all date/GW-deadline maths; matches the upgrade architecture in `howupgradeshouldwork-1.md` (Node/TS project) |
+| DB | **PostgreSQL 18** (18.6+) + Knex migrations | Latest major; `uuidv7()` built-in (UID generation), async I/O perf gains; the upgrade doc's backup/restore machinery is built around `pg_dump`/`pg_restore` |
+| Frontend | **React 19 + Vite 7** + TypeScript | Latest stable SPA toolchain, served from `frontend/dist` per the release layout |
 | Scheduler | node-cron in-process | Simple; jobs are re-entrant and idempotent |
 | Realtime | Server-Sent Events | Run-button progress + token counter streaming; no websocket infra needed |
 | Process manager | systemd unit pointing at `current/backend/dist/server.js` | Per upgrade doc |
+
+**Version policy:** always adopt the **latest stable** major of every stack
+component at build time, then **pin exactly** — `"engines": {"node": ">=26"}`
+in package.json plus an install-time runtime check (per the upgrade doc's
+"Node version drift" pitfall: a release built for Node 26 must refuse to
+start under an older runtime), lockfiles committed, PostgreSQL major pinned
+in `install.sh` with the same existence-check discipline. Upgrading a major
+version of anything is a normal release through `upgrade.sh`, never an
+in-place drift.
 
 Repository layout:
 
 ```
 fpl-algorithm/
 ├── CLAUDE.md                  # build rules: theme, conventions, upgrade rules (see §12, §14)
+├── fpl-engines-plan.md        # deep build spec for statistical + match engines (authoritative)
 ├── version.json               # { "version": "x.y.z", "schema": N }
 ├── backend/
 │   ├── src/
@@ -270,6 +281,11 @@ Each doc ends with a go/no-go and the polling schedule for that provider.
 
 ## 5. Statistical Engine (built from scratch)
 
+> **Authoritative spec: `fpl-engines-plan.md` Parts 1–4** — exact endpoint
+> field references, interpretation guide, the twelve model layers with
+> formulas, calibration targets, and acceptance gates. This section is the
+> executive summary.
+
 No third-party prediction library. The engine is a pipeline of explicit,
 testable models. All probabilities land in the player matrix.
 
@@ -296,7 +312,9 @@ testable models. All probabilities land in the player matrix.
 ### 5.3 Player expected points model → `xpts_next{1,3,6}`
 
 For each player × fixture, compose per the official FPL scoring rules
-(2025/26 rules incl. defensive-contribution points):
+(2026/27 rules incl. defensive-contribution points — DEF: +2 at 10 CBIT;
+MID/FWD: +2 at 12 CBIRT — and the 2026/27 BPS rebalance; full constants
+table in `fpl-engines-plan.md` §2.4):
 
 ```
 xPts = p_appearance · appearance_pts
@@ -341,6 +359,11 @@ code. Every run records the config version used → reproducibility.
 ---
 
 ## 6. Match Engine (match compatibility)
+
+> **Authoritative spec: `fpl-engines-plan.md` Part 5** (computations,
+> algorithms, output tables) and **Part 6** (full integration DAG, interface
+> contracts, snapshot isolation, fast paths). This section is the executive
+> summary.
 
 Purpose: tell the frontend modes **which players from which upcoming matches
 are the best to move on** — the bridge between fixtures and picks.
@@ -470,8 +493,12 @@ The **FPL Engine** is the shared core every mode calls. It owns:
 
 - **Rules model:** squad = 15 (2 GK / 5 DEF / 5 MID / 3 FWD), ≤3 per club,
   £100.0m initial budget, valid formations, captain/vice, bench order,
-  transfer rules (1 free/GW, banked max 5, −4 hits), chips (WC×2, FH, BB, TC,
-  AM if current season has it) — encoded as pure, unit-tested functions.
+  transfer rules (1 free/GW, banked max 5, −4 hits), and the **2026/27 chip
+  system: two full chip sets (Wildcard, Free Hit, Triple Captain, Bench
+  Boost = 8 chips), set 1 usable only up to the GW19 deadline with no
+  carry-over, set 2 covers GW20–38** — encoded as pure, unit-tested
+  functions with season-versioned rule configs (FPL changes rules yearly;
+  the AM-chip experiment of 24/25 proved shapes can appear and vanish).
 - **Squad optimiser:** maximise Σ expected points subject to the rule
   constraints. Implementation: linear programming via a small ILP solver
   (e.g. `javascript-lp-solver`) with a documented greedy+swap fallback;
@@ -735,7 +762,15 @@ It must contain, at minimum:
 3. **Architecture invariants:** player UID rules (§3), max-2 API / max-1 AI
    gates enforced server-side, AI adjustment bounds, token ledger atomicity,
    no secrets to frontend.
-4. **Definition of done:** typecheck + tests + Playwright responsive
+4. **Engines contract:** "any work on ingestion, the statistical engine, or
+   the match engine follows `fpl-engines-plan.md` — layer boundaries,
+   snapshot isolation, leakage rules, and acceptance gates are
+   non-negotiable; config values marked ⚙ live in `model_config`, never in
+   code."
+5. **Version policy:** latest stable majors, pinned (Node 26 / PostgreSQL 18
+   / Fastify 5 / React 19 / Vite 7 at time of writing); runtime checks per
+   §2.
+6. **Definition of done:** typecheck + tests + Playwright responsive
    screenshots green; no page with horizontal overflow.
 
 ---
@@ -747,8 +782,8 @@ It must contain, at minimum:
 | **0. Foundations** (wk 1–2) | Repo scaffold, CLAUDE.md, version.json, migrations 0001–0002, auth + sessions + admin bootstrap, `scripts/lib.sh` + first `install.sh`, CI (typecheck/test/lint) | install.sh brings up a login-gated empty app on a clean VM |
 | **1. Player DB + FPL anchor** (wk 2–4) | FPL official API ingest, player registry + UID + identity mapping, players table UI, cron polling | Full PL player list with live prices/status, zero duplicate players |
 | **2. Ingest gateway + 2 providers** (wk 4–7) | API analysis docs (§4.4) for all 5+, gateway with max-2 switch + quota log + circuit breaker, adapters #1 API-Football & #4 news provider; admin API-switch UI | Injuries + news flowing in, mapped to UIDs; third-enable correctly refused |
-| **3. Statistical engine** (wk 7–11) | Minutes model, team goals model, xPts, own FDR, stat_score, matrix snapshots, backtest harness | Backtest report vs last season; calibration plots acceptable; matrix visible in player detail |
-| **4. Match engine** (wk 11–12) | Fixture leverage scores, players-to-target, team fixture-coverage, DGW/BGW detection | match_insights per GW rendering in UI |
+| **3. Statistical engine** (wk 7–11) | Work packages E1–E8 of `fpl-engines-plan.md` Part 7: ingestion→UID pipeline, historical import + feature factory, Dixon-Coles + odds blend, minutes model, production models, xPts composer, backtest harness, stat_score/matrix | E-package exit criteria in the engines plan; backtest beats naive + FPL `ep_next` benchmarks; calibration plots acceptable; matrix visible in player detail |
+| **4. Match engine** (wk 11–12) | Work packages E9–E10: fixture leverage, players-to-target, coverage/gaps, DGW/BGW, chip-window scoring (two-set 26/27 rules), integration DAG + fast paths | E9/E10 exit criteria; match_insights per GW rendering in UI; lineup-confirmed mini-run < 30 s |
 | **5. AI layer + Run** (wk 12–16) | AI gateway max-1 + all 7 adapters, structured verdicts, token ledger + estimates + warnings, exclusion list, caching, Run Orchestrator + SSE run screen | Full run: news → AI → stats → re-rank with accurate token report; Ollama path works offline |
 | **6. FPL engine + 3 modes** (wk 16–20) | Rules model, optimiser, transfer suggester, team valuation; Initial / FH-WC / Weekly pages | Optimiser produces valid squads under all constraints (property tests); all 3 modes usable end-to-end |
 | **7. Your Teams + vision** (wk 20–22) | Unlimited teams, pitch view, image upload pipeline + confirmation screen, sync-from-image in all modes | Screenshot of a real FPL team parses to a confirmed 15-man squad |
