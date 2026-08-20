@@ -27,12 +27,15 @@ export function getClientIp(req: FastifyRequest): string {
   return req.ip;
 }
 
-export async function authRoutes(app: FastifyInstance, opts: { db: Knex }): Promise<void> {
-  const { db } = opts;
-
+/**
+ * Session + CSRF hooks. MUST be registered on the ROOT fastify instance
+ * (not inside a route plugin): Fastify hooks are encapsulated per plugin,
+ * so hooks added inside authRoutes would never cover sibling route plugins.
+ */
+export function registerSessionHooks(app: FastifyInstance, db: Knex): void {
   app.decorateRequest('user', null);
 
-  // session resolution for every request in this app
+  // session resolution for every request
   app.addHook('onRequest', async (req) => {
     const token = req.cookies[SESSION_COOKIE];
     req.user = token ? await resolveSession(db, token) : null;
@@ -49,6 +52,10 @@ export async function authRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       }
     }
   });
+}
+
+export async function authRoutes(app: FastifyInstance, opts: { db: Knex }): Promise<void> {
+  const { db } = opts;
 
   const LoginSchema = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(200) });
 

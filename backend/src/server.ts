@@ -11,7 +11,7 @@ import { log } from './core/logger.js';
 import { registerFeatures } from './core/kernel.js';
 import { seedModelConfig } from './core/model-config.js';
 import { seedProviders } from './ingest/registry.js';
-import { authRoutes } from './routes/auth.js';
+import { authRoutes, registerSessionHooks } from './routes/auth.js';
 import { systemRoutes } from './routes/system.js';
 import { playerRoutes } from './routes/players.js';
 import { adminRoutes } from './routes/admin.js';
@@ -47,6 +47,7 @@ export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance
     reply.code(status).send({ error: status >= 500 ? 'internal error' : err.message });
   });
 
+  registerSessionHooks(app, db);
   await app.register(authRoutes, { db });
   await app.register(systemRoutes, { db });
   await app.register(playerRoutes, { db });
