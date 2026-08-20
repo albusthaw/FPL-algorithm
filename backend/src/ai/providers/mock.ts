@@ -12,13 +12,25 @@ export interface MockScript {
   lengthFinish?: boolean;
 }
 
+export interface MockRosterPlayer {
+  name: string;
+  club: string | null;
+  price: number | null;
+  captain: boolean;
+  vice: boolean;
+  bench_position: number | null;
+}
+
 export class MockProvider implements AIProviderAdapter {
   key = 'mock';
   supportsVision = true;
   supportsNativeJsonSchema = true;
   calls = 0;
 
-  constructor(private script: MockScript = {}) {}
+  constructor(
+    private script: MockScript = {},
+    private roster?: MockRosterPlayer[], // seeded from ai_providers.config for realistic vision parses
+  ) {}
 
   private usage(prompt: string, completion: string): ProviderResult['usage'] {
     return {
@@ -68,8 +80,10 @@ export class MockProvider implements AIProviderAdapter {
   }
 
   async parseTeamImage(_imageBase64: string, _mimeType: string, _inv: AIInvocation): Promise<ProviderResult> {
-    // deterministic 15-man parse used by E2E vision tests
-    const players = [
+    // deterministic 15-man parse used by E2E vision tests; a roster seeded
+    // from the live player DB (ai_providers.config.roster) takes precedence
+    // over this static fallback (player names churn every season)
+    const players = this.roster ?? [
       { name: 'Raya', club: 'ARS', price: 6.0, captain: false, vice: false, bench_position: null },
       { name: 'Gabriel', club: 'ARS', price: 6.3, captain: false, vice: false, bench_position: null },
       { name: 'Virgil', club: 'LIV', price: 6.0, captain: false, vice: false, bench_position: null },

@@ -40,7 +40,7 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
     budget: z.number().int().min(500).max(1200).default(1000),
     locked: z.array(z.string()).default([]),
     banned: z.array(z.string()).default([]),
-    compareTeamId: z.number().int().nullable().default(null),
+    compareTeamId: z.coerce.number().int().nullable().default(null),
   });
 
   app.post('/api/modes/initial', async (req, reply) => {
@@ -96,7 +96,7 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
 
   // ── Mode 2: Free Hit / Wildcard
   const ChipsSchema = z.object({
-    teamId: z.number().int(),
+    teamId: z.coerce.number().int(),
     chip: z.enum(['freehit', 'wildcard']).nullable().default(null),
     event: z.number().int().nullable().default(null),
   });
@@ -174,7 +174,7 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
 
   // ── Mode 3: Weekly
   const WeeklySchema = z.object({
-    teamId: z.number().int(),
+    teamId: z.coerce.number().int(),
     horizon: z.union([z.literal(1), z.literal(3), z.literal(6)]).default(3),
   });
 

@@ -63,7 +63,9 @@ export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance
     path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../../../frontend/dist'),
   ].find((p) => fs.existsSync(path.join(p, 'index.html')));
   if (frontendDist) {
-    await app.register(fastifyStatic, { root: frontendDist, wildcard: false });
+    // dynamic wildcard serving: per-file routes freeze the file list at boot
+    // and would 404 rebuilt hashed assets into the SPA fallback
+    await app.register(fastifyStatic, { root: frontendDist });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'not found' });
       return reply.sendFile('index.html');

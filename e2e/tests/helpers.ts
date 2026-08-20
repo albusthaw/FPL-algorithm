@@ -12,14 +12,21 @@ export async function login(page: Page, creds: { email: string; password: string
 }
 
 /** The §12.2 hard requirement: no horizontal page scroll, ever. */
-export async function assertNoHorizontalOverflow(page: Page): Promise<void> {
+export async function assertNoHorizontalOverflow(page: Page, label = ''): Promise<void> {
   const overflow = await page.evaluate(() => {
     const doc = document.documentElement;
-    return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth };
+    // name the widest offender to make failures actionable
+    let worst = { tag: '', cls: '', width: 0 };
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      const r = (el as HTMLElement).getBoundingClientRect();
+      if (r.right > worst.width) worst = { tag: el.tagName, cls: (el as HTMLElement).className?.toString?.().slice(0, 60) ?? '', width: Math.round(r.right) };
+    }
+    return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, worst };
   });
-  expect(overflow.scrollWidth, `page overflows horizontally (${overflow.scrollWidth} > ${overflow.clientWidth})`).toBeLessThanOrEqual(
-    overflow.clientWidth + 1,
-  );
+  expect(
+    overflow.scrollWidth,
+    `${label || page.url()} overflows horizontally (${overflow.scrollWidth} > ${overflow.clientWidth}); widest: <${overflow.worst.tag} class="${overflow.worst.cls}"> right=${overflow.worst.width}`,
+  ).toBeLessThanOrEqual(overflow.clientWidth + 1);
 }
 
 /** 1×1 transparent PNG for the vision-upload flow (mock provider ignores pixels). */

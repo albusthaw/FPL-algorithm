@@ -56,7 +56,7 @@ export function DashboardPage(): ReactNode {
   return (
     <div className="container">
       <section className="section" style={{ borderBottom: 'none', paddingBottom: 0 }}>
-        <div className="grid-2" style={{ gridTemplateColumns: '1.25fr .75fr', alignItems: 'start' }}>
+        <div className="grid-2 wide-left" style={{ alignItems: 'start' }}>
           <div>
             <p className="kicker">Power Rankings{runId ? ` · Run #${runId}` : ''}</p>
             <h2 className="section-title" style={{ marginBottom: 18 }}>The engine's current top picks</h2>

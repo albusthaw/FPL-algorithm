@@ -208,7 +208,7 @@ export function ChipsModePage(): ReactNode {
     void api.get<{ teams: { id: number; name: string; playerCount: number }[] }>('/api/teams').then((r) => {
       setTeams(r.teams);
       const full = r.teams.find((t) => t.playerCount === 15);
-      if (full) setTeamId(full.id);
+      if (full) setTeamId(Number(full.id));
     });
   }, []);
 
@@ -315,7 +315,7 @@ export function WeeklyModePage(): ReactNode {
     void api.get<{ teams: typeof teams }>('/api/teams').then((r) => {
       setTeams(r.teams);
       const full = r.teams.find((t) => t.playerCount === 15);
-      if (full) setTeamId(full.id);
+      if (full) setTeamId(Number(full.id));
     });
   }, []);
 

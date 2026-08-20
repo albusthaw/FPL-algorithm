@@ -271,7 +271,9 @@ tbody tr.clickable:hover{background:#E4DFD2;}
 .badge.brass{color:#8a6820;border-color:rgba(184,137,47,.55);}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:22px;}
 .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;}
+@media (min-width:901px){.grid-2.wide-left{grid-template-columns:1.25fr .75fr;}}
 @media (max-width:900px){.grid-2,.grid-3{grid-template-columns:1fr;}}
+.grid-2>*,.grid-3>*{min-width:0;} /* grid children may not force horizontal overflow */
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
 .spread{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}
 .stack{display:flex;flex-direction:column;gap:12px;}

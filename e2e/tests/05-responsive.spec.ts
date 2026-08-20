@@ -34,7 +34,7 @@ for (const width of WIDTHS) {
       for (const target of PAGES) {
         await page.goto(target.path);
         await page.waitForLoadState('networkidle');
-        await assertNoHorizontalOverflow(page);
+        await assertNoHorizontalOverflow(page, `${target.name}@${width}`);
       }
     });
 

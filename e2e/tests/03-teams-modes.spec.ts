@@ -22,9 +22,10 @@ test.describe('teams + vision + modes', () => {
     await page.getByTestId('new-team-create').click();
     await expect(page).toHaveURL(/\/teams\/\d+/);
 
-    // upload → mock vision provider returns a deterministic 15-man parse
+    // upload → mock vision provider returns a deterministic 15-man parse.
+    // setInputFiles directly on the hidden input (clicking the button would
+    // open a native file chooser and hang headless).
     const fileInput = page.locator('input[type="file"]');
-    await page.getByTestId('upload-btn').click();
     await fileInput.setInputFiles({ name: 'team.png', mimeType: 'image/png', buffer: TINY_PNG });
 
     // MANDATORY confirmation screen — never auto-trusted
