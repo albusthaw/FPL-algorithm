@@ -13,9 +13,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# fail fast on the wrong box — before any verification chatter
+[ -L "${APP_DIR}/current" ] || { console "no existing install at ${APP_DIR} — use install.sh"; exit 2; }
+
 DB_PASSWORD="$(read_env_var DB_PASSWORD "${APP_DIR}/shared/.env")"
 export PGPASSWORD="${DB_PASSWORD}"
 PGARGS=(-h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}")
+
+# ── prerequisites + firewall: VERIFY only — an upgrade never installs
+# packages or changes firewall rules; it fails fast if the box is broken.
+run_step "prerequisites (verify: node ${NODE_MIN_MAJOR}+, postgres, tools)" ensure_prerequisites verify
+run_step "firewall (verify)" setup_firewall verify
 
 # ── detect the installed site + credentials — upgrades NEVER change either.
 # Snapshot both so the end of the run can PROVE they are untouched.
@@ -116,7 +124,6 @@ if [ -z "${PAYLOAD}" ] || [ ! -f "${PAYLOAD}/version.json" ]; then
   console "no payload found — run from the release zip"
   exit 2
 fi
-[ -L "${APP_DIR}/current" ] || { console "no existing install at ${APP_DIR} — use install.sh"; exit 2; }
 
 NEW_VERSION="$(json_field "${PAYLOAD}/version.json" version)"
 NEW_SCHEMA="$(json_field "${PAYLOAD}/version.json" schema)"

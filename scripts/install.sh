@@ -7,8 +7,13 @@
 # health-checks, prints the summary box. Second runs must never be scarier
 # than the first.
 #
+# On a FRESH server it also provisions: installs missing prerequisites
+# (Node ${NODE_MIN_MAJOR}, PostgreSQL, nginx, curl/unzip — root + apt) and
+# configures the ufw firewall (allow SSH/80/443, deny the rest).
+#
 # Usage: bash install.sh [--from-payload DIR]
-# Env overrides: APP_DIR, DB_NAME_OVERRIDE, APP_PORT, ADMIN_EMAIL, NO_SYSTEMD
+# Env overrides: APP_DIR, DB_NAME_OVERRIDE, APP_PORT, ADMIN_EMAIL, NO_SYSTEMD,
+#                SITE_DOMAIN, PROVISION=auto|true|false, NO_FIREWALL, NO_NGINX
 # ═══════════════════════════════════════════════════════════════════════════
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -23,11 +28,18 @@ if [ -z "${PAYLOAD}" ] || [ ! -f "${PAYLOAD}/version.json" ]; then
   exit 2
 fi
 
+console ""
+console "  Installing ${APP_NAME} → ${APP_DIR}"
+console ""
+
+# prerequisites FIRST — on a fresh server nothing below (including reading
+# version.json, which needs node) works until they exist
+run_step "prerequisites (node ${NODE_MIN_MAJOR}+, postgres ${PG_PIN_MAJOR}, nginx, tools — install if missing)" \
+  ensure_prerequisites install
+
 VERSION="$(json_field "${PAYLOAD}/version.json" version)"
 SCHEMA="$(json_field "${PAYLOAD}/version.json" schema)"
-console ""
-console "  Installing ${APP_NAME} v${VERSION} (schema ${SCHEMA}) → ${APP_DIR}"
-console ""
+console "  ${C_DIM}·${C_OFF} release: ${C_GREEN}v${VERSION}${C_OFF} (schema ${SCHEMA})"
 
 run_step "runtime checks (node >= ${NODE_MIN_MAJOR}, psql)" bash -c 'true'
 require_node
@@ -38,6 +50,9 @@ CURRENT_STEP="site domain"
 prompt_site_domain
 console "  ${C_DIM}·${C_OFF} site domain: ${C_GREEN}${SITE_DOMAIN}${C_OFF}"
 CURRENT_STEP=""
+
+# ── firewall: allow SSH first (lockout guard), then 80/443; app loopback-only
+run_step "firewall (ufw: allow 22/80/443, deny the rest)" setup_firewall install
 
 # ── layout ──────────────────────────────────────────────────────────────────
 make_layout() {

@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.0.3 — 2026-08-21 · schema 8
+
+No migration (scripts-only release). Fresh-server provisioning.
+
+- install.sh/reinstall.sh now install missing prerequisites on a fresh box
+  (root + apt): Node 22 via NodeSource, PostgreSQL 16 (PGDG
+  repo fallback when the distro archive lacks it), nginx, curl/unzip — and
+  start the postgres server. Without root/apt they fail fast with the exact
+  missing list and manual commands. `ensure_prerequisites` runs BEFORE
+  version.json is parsed (parsing needs node).
+- Firewall: install.sh/reinstall.sh configure ufw — SSH allowed FIRST
+  (lockout guard), then 80/443, default deny incoming, enable if inactive;
+  the app port stays loopback-only behind nginx. `NO_FIREWALL=true` to skip.
+- upgrade.sh VERIFIES prerequisites and firewall (never installs packages or
+  changes rules — upgrades stay unsurprising) and fails fast if the box is
+  broken (e.g. postgres down).
+- psql_super gains a root `runuser` fallback for minimal Debian without sudo;
+  reinstall --purge terminates connections and quotes the DB identifier.
+- Rehearsals pin PROVISION=false NO_FIREWALL=true (never touch the host).
+- Hardening from adversarial review (all confirmed by traced repro):
+  `set -Eeuo pipefail` so the ERR trap fires inside step functions (failures
+  now banner properly and upgrade auto-restore is reachable);
+  `DPkg::Lock::Timeout=300` on all apt calls (no first-boot race against
+  unattended-upgrades); PGDG fallback keyed on an explicit `apt-cache policy`
+  availability probe (a transient apt failure is no longer misdiagnosed, apt
+  stderr reaches the log); server detection keyed on the postgres binary, not
+  the psql client (client-only boxes now get the server installed; remote
+  DB_HOST needs client only); `ca-certificates`+`gnupg` installed before any
+  https bootstrap fetch; ufw allows the port(s) sshd REALLY listens on
+  (live sockets → sshd_config → 22) before enabling — no lockout on
+  non-default SSH ports.
+
 ## v1.0.2 — 2026-08-20 · schema 8
 
 No migration (scripts-only release).

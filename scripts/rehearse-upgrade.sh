@@ -23,6 +23,8 @@ export APP_PORT="$((3200 + RANDOM % 500))"
 export LOG_DIR="${REHEARSAL_ROOT}/logs"
 export NO_SYSTEMD=true
 export NO_NGINX=true
+export PROVISION=false   # rehearsals never install packages
+export NO_FIREWALL=true  # …or touch the firewall
 # must be a zod-valid email — the rehearsal logs in with it via /api/auth/login
 export ADMIN_EMAIL="rehearsal@example.test"
 
