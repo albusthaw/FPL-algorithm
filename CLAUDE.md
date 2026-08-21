@@ -163,8 +163,13 @@ immutable, everything mutable in `shared/`, mismatch guards exit 78.
 - **Token ledger atomicity:** debits inside `SELECT ... FOR UPDATE`
   transactions; balance never negative; every ledger row has a reason and
   actor; admins unlimited but usage recorded.
-- **No secrets to the frontend:** API keys live in `shared/.env`; the admin
-  UI sees status only, never values.
+- **No secrets to the frontend:** API keys live in `shared/.env`, never in
+  the DB. The admin panel MAY submit a key (write-only, via
+  `PUT /api/admin/keys`, allowlisted env names in `core/secrets.ts`); the
+  server persists it to `shared/.env` and applies it live. Responses carry
+  status + last-4 hint only — a key value is never sent back to a browser.
+  Enabling a football provider / activating an AI provider is refused
+  server-side without its key.
 - **Runs are append-only snapshots:** a Run writes `derived.*` tables keyed
   by `run_id`, never mutates canonical facts; the frontend reads the latest
   COMPLETED run; a failed run stays invisible.

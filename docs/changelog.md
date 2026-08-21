@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.1.0 — 2026-08-21 · schema 8
+
+No migration. API keys in the admin panel, AI model choice, engine cold-start
+fix, table sorting, plain-language UI.
+
+- **API keys are entered in the admin panel** (Data providers / AI provider
+  tabs). Keys are stored server-side in `shared/.env` — never in the
+  database, never sent back to the browser (status + last-4 hint only) — and
+  take effect immediately, no restart. The old way (editing `shared/.env`
+  by hand + restart) still works.
+- **Enabling is key-gated server-side**: a football provider cannot be
+  enabled and an AI provider cannot be activated without its key (clear
+  message instead of failed pulls). FPL anchor, Understat, TheSportsDB,
+  Ollama and the mock need no key.
+- **AI model choice per provider** with a "Load models" button that fetches
+  the provider's live model list (OpenAI-compatible `/models`, Anthropic,
+  Gemini, Ollama tags). The choice is stored in the provider's config.
+- **Engine cold-start fixed** (the all-NaN / everyone-rank-1 / Haaland-at-6%
+  bug on fresh installs): Dixon-Coles no longer divides by zero with no
+  finished matches (priors are the fit); "new signing" no longer applies to
+  the entire league when history is empty; players without match history get
+  an ownership-based start prior (69%-owned ⇒ ~90% start, 0.3%-owned ⇒
+  ~20%); every number is sanitised before it reaches the database. First run
+  on a fresh install now auto-imports last season's history (statistical
+  data only).
+- **Run screen**: skip-list bulk buttons (Unselect all · Bottom 20/30/40/
+  50/60%), and the pre-flight now explains WHY nobody is eligible (e.g. "no
+  news provider is enabled") before you launch.
+- **Players table**: every column header sorts (click again to flip).
+- Plain language everywhere: no "NaN" (dashes instead), no "(stale)"
+  ("carried forward"), friendlier status labels and stage names.
+
 ## v1.0.3 — 2026-08-21 · schema 8
 
 No migration (scripts-only release). Fresh-server provisioning.

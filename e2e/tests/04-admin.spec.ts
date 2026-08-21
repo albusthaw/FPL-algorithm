@@ -26,32 +26,56 @@ test.describe('admin panel', () => {
   test('API switch enforces max-2 with a visible refusal', async ({ page }) => {
     await login(page, ADMIN);
     await page.goto('/admin');
+
+    // enabling now requires a key — seed dummy keys for three providers the
+    // way the panel does, so the max-2 gate (not the key gate) is what trips
+    const setKey = async (env: string, value: string): Promise<void> => {
+      await page.evaluate(
+        async ({ env, value }) => {
+          await fetch('/api/admin/keys', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'x-requested-with': 'fpl-frontend' },
+            body: JSON.stringify({ env, value }),
+          });
+        },
+        { env, value },
+      );
+    };
+    await setKey('API_FOOTBALL_KEY', 'e2e-dummy-key');
+    await setKey('NEWSDATA_KEY', 'e2e-dummy-key');
+    await setKey('SPORTMONKS_TOKEN', 'e2e-dummy-key');
+    await page.reload();
     await page.getByTestId('admin-tab-providers').click();
 
     const toggle = async (key: string): Promise<void> => {
       await page.getByTestId(`provider-toggle-${key}`).click();
       await page.waitForTimeout(400);
     };
-    // enable two, then the third must be refused with the 409 message
+    // reset to all-disabled, then enable two; the third must be refused
     for (const key of ['api_football', 'newsdata', 'sportmonks', 'football_data', 'thesportsdb', 'understat']) {
       const button = page.getByTestId(`provider-toggle-${key}`);
-      if ((await button.textContent())?.includes('Enabled')) await toggle(key); // reset to disabled
+      if ((await button.textContent())?.includes('Enabled')) await toggle(key);
     }
     await toggle('api_football');
     await toggle('newsdata');
     await toggle('sportmonks'); // third — refused
     await expect(page.getByTestId('provider-error')).toContainText(/at most 2/i);
+
+    // clean up the dummy keys
+    await setKey('API_FOOTBALL_KEY', '');
+    await setKey('NEWSDATA_KEY', '');
+    await setKey('SPORTMONKS_TOKEN', '');
   });
 
   test('AI switch: activating one deactivates the incumbent (max 1)', async ({ page }) => {
     await login(page, ADMIN);
     await page.goto('/admin');
     await page.getByTestId('admin-tab-ai').click();
-    await expect(page.getByTestId('ai-mock')).toContainText('ALIVE'); // from the E2E seed
+    await expect(page.getByTestId('ai-mock')).toContainText('ACTIVE'); // from the E2E seed
     // ollama would fail its health probe (no local model) → stays un-enableable
     await page.getByTestId('ai-activate-ollama').click();
     await expect(page.getByTestId('ai-error')).toContainText(/health check failed/i);
-    await expect(page.getByTestId('ai-mock')).toContainText('ALIVE'); // incumbent survives a failed probe
+    await expect(page.getByTestId('ai-mock')).toContainText('ACTIVE'); // incumbent survives a failed probe
   });
 
   test('model weights save as a new config version', async ({ page }) => {

@@ -10,6 +10,14 @@ import { getConfig, setConfig } from '../core/model-config.js';
 import { setEnabled as setFeatureEnabled } from '../core/kernel.js';
 import { resolveManually } from '../players/resolver.js';
 import { config } from '../core/config.js';
+import {
+  PROVIDER_KEY_FIELDS,
+  keyConfigured,
+  keyHint,
+  requiresKey,
+  setProviderSecret,
+  SecretValidationError,
+} from '../core/secrets.js';
 
 export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Promise<void> {
   const { db } = opts;
@@ -123,18 +131,20 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
   app.get('/api/admin/providers', async (req) => {
     requireAdmin(req);
     const providers = await db('api_providers').orderBy('key');
-    // key STATUS only — never key values (no secrets to the frontend)
-    const keyStatus: Record<string, boolean> = {
-      api_football: !!config.keys.apiFootball,
-      sportmonks: !!config.keys.sportmonks,
-      football_data: !!config.keys.footballData,
-      newsdata: !!config.keys.newsdata,
-      thesportsdb: !!config.keys.thesportsdb,
-      fpl: true,
-      understat: true,
-    };
+    // key STATUS + masked hint only — never key values (no secrets to the frontend)
     return {
-      providers: providers.map((p) => ({ ...p, keyConfigured: keyStatus[p.key] ?? false })),
+      providers: providers.map((p) => ({
+        ...p,
+        keyConfigured: keyConfigured(p.key),
+        keyHint: keyHint(p.key),
+        requiresKey: requiresKey(p.key),
+        keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
+          env: f.env,
+          label: f.label,
+          secret: f.secret,
+          set: !!(process.env[f.env] ?? '').trim(),
+        })),
+      })),
       pairings: [
         { name: 'Free-only', pair: ['football_data', 'newsdata'], note: 'API-Football free cannot see the current season; Sportmonks free has no EPL. Minutes model runs statistical-only (no lineup provider).' },
         { name: 'Recommended (~$29/mo)', pair: ['api_football', 'newsdata'], note: 'API-Football Pro unlocks current season, injuries, lineups, odds — the full engine feature set.' },
@@ -150,6 +160,10 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     const key = (req.params as { key: string }).key;
     const parsed = ProviderToggleSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid toggle' });
+    // no key, no enable — a keyless provider only produces failed pulls
+    if (parsed.data.enabled && requiresKey(key) && !keyConfigured(key)) {
+      return reply.code(422).send({ error: 'add this provider’s API key first (Settings → API keys)' });
+    }
     try {
       await setProviderEnabled(db, key, parsed.data.enabled);
     } catch (err) {
@@ -159,26 +173,51 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     return { ok: true };
   });
 
+  // ── API keys: entered here, stored server-side in shared/.env, applied
+  //    immediately. The response never contains the value.
+  const SecretSchema = z.object({ env: z.string().min(1).max(64), value: z.string().max(500) });
+
+  app.put('/api/admin/keys', async (req, reply) => {
+    requireAdmin(req);
+    const parsed = SecretSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid key payload' });
+    try {
+      setProviderSecret(parsed.data.env, parsed.data.value);
+    } catch (err) {
+      if (err instanceof SecretValidationError) return reply.code(422).send({ error: err.message });
+      return reply.code(500).send({ error: 'could not save the key' });
+    }
+    return { ok: true, set: parsed.data.value.trim().length > 0 };
+  });
+
   // ── AI provider switch (max 1 alive)
   app.get('/api/admin/ai-providers', async (req) => {
     requireAdmin(req);
     const providers = await db('ai_providers').orderBy('key');
-    const keyStatus: Record<string, boolean> = {
-      anthropic: !!config.keys.anthropic,
-      openai: !!config.keys.openai,
-      gemini: !!config.keys.gemini,
-      deepseek: !!config.keys.deepseek,
-      kimi: !!config.keys.kimi,
-      ollama: true,
-      modal: !!config.keys.modalUrl,
-      mock: true,
+    return {
+      providers: providers.map((p) => ({
+        ...p,
+        keyConfigured: keyConfigured(p.key),
+        keyHint: keyHint(p.key),
+        requiresKey: requiresKey(p.key),
+        model: (p.config as { model?: string } | null)?.model ?? null,
+        keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
+          env: f.env,
+          label: f.label,
+          secret: f.secret,
+          set: !!(process.env[f.env] ?? '').trim(),
+        })),
+      })),
     };
-    return { providers: providers.map((p) => ({ ...p, keyConfigured: keyStatus[p.key] ?? false })) };
   });
 
   app.post('/api/admin/ai-providers/:key/activate', async (req, reply) => {
     requireAdmin(req);
     const key = (req.params as { key: string }).key;
+    // no key, no activation — and say so plainly instead of a cryptic probe error
+    if (requiresKey(key) && !keyConfigured(key)) {
+      return reply.code(422).send({ error: 'add this provider’s API key first (Settings → API keys)' });
+    }
     // probe at enable-time: failures keep the provider un-enableable, reason shown
     try {
       const row = await db('ai_providers').where({ key }).first();
@@ -191,6 +230,39 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }
+  });
+
+  // ── AI models: live list from the provider ("autoload") + choice persisted
+  //    in the provider's config (a model name is not a secret)
+  app.get('/api/admin/ai-providers/:key/models', async (req, reply) => {
+    requireAdmin(req);
+    const key = (req.params as { key: string }).key;
+    if (requiresKey(key) && !keyConfigured(key)) {
+      return reply.code(422).send({ error: 'add this provider’s API key first, then load its models' });
+    }
+    const row = await db('ai_providers').where({ key }).first();
+    if (!row) return reply.code(404).send({ error: 'unknown provider' });
+    try {
+      const adapter = buildAdapter(key, row.config ?? {});
+      const models = adapter.listModels ? await adapter.listModels() : [];
+      return { models, current: (row.config as { model?: string } | null)?.model ?? null };
+    } catch (err) {
+      return reply.code(502).send({ error: `could not load models: ${(err as Error).message}` });
+    }
+  });
+
+  const ModelSchema = z.object({ model: z.string().min(1).max(120).regex(/^[\w.\-:/]+$/) });
+
+  app.put('/api/admin/ai-providers/:key/model', async (req, reply) => {
+    requireAdmin(req);
+    const key = (req.params as { key: string }).key;
+    const parsed = ModelSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid model name' });
+    const row = await db('ai_providers').where({ key }).first();
+    if (!row) return reply.code(404).send({ error: 'unknown provider' });
+    const cfg = { ...(row.config ?? {}), model: parsed.data.model };
+    await db('ai_providers').where({ key }).update({ config: JSON.stringify(cfg), updated_at: db.fn.now() });
+    return { ok: true, model: parsed.data.model };
   });
 
   app.post('/api/admin/ai-providers/deactivate', async (req) => {

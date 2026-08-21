@@ -90,6 +90,15 @@ export async function startRun(db: Knex, opts: RunOptions): Promise<{ runId: num
   return { runId, attached: false };
 }
 
+/** "2025-26"-style label for the season before the one now starting/running. */
+function previousSeasonLabel(now = new Date()): string {
+  // a football season YYYY-(YY+1) starts in August; before August we are
+  // still inside the season that started the previous calendar year
+  const seasonStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const prevStart = seasonStartYear - 1;
+  return `${prevStart}-${String((prevStart + 1) % 100).padStart(2, '0')}`;
+}
+
 async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<void> {
   const stages: Record<string, number> = {};
   const degradations: string[] = [];
@@ -132,6 +141,20 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
       await syncFplFixtures(db);
     } catch (err) {
       degradations.push(`FPL sync degraded (${String(err).slice(0, 120)}) — using last snapshot`);
+    }
+    // first run on a fresh install: no per-match history yet → the models
+    // would run on priors alone. Import last season once, automatically
+    // (statistical data only — no AI involved).
+    try {
+      const historyCount = (await db('player_match_stats').count('* as c')) as { c: string }[];
+      if (Number(historyCount[0]?.c ?? 0) === 0) {
+        const { importHistoricalSeason } = await import('../ingest/historical.js');
+        const prevSeason = previousSeasonLabel();
+        const result = await importHistoricalSeason(db, prevSeason);
+        degradations.push(`first run: imported ${prevSeason} history automatically (${result.playerRows} match rows)`);
+      }
+    } catch (err) {
+      degradations.push(`history import unavailable (${String(err).slice(0, 120)}) — predictions use season-start estimates`);
     }
   });
 

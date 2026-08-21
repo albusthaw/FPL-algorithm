@@ -75,6 +75,17 @@ export function predictMinutes(input: MinutesModelInput, cfg: MinutesConfig): Mi
       break;
     }
   }
+  // cold start (no match history at all — fresh install, pre-season, or a
+  // brand-new player): ownership is the community's revealed start
+  // expectation, the strongest signal available without minutes data
+  if (input.startShare5 === 0 && input.minutesEwma === 0) {
+    const own = Math.max(0, Math.min(100, input.selectedByPct ?? 0));
+    const ownershipPrior = Math.min(0.92, 0.15 + 0.9 * Math.sqrt(own / 100));
+    if (ownershipPrior > base) {
+      base = ownershipPrior;
+      evidence.coldStartOwnershipPrior = Number(ownershipPrior.toFixed(3));
+    }
+  }
   evidence.base = base;
   evidence.startShare5 = input.startShare5;
   evidence.minutesEwma = Math.round(input.minutesEwma);

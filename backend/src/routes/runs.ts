@@ -47,7 +47,19 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
     // saved manual exclusions
     const saved = await db('ai_exclusions').where('user_id', req.user.id).pluck('player_uid');
     const aiProvider = await db('ai_providers').where('alive', true).first('key', 'supports_vision');
-    return { runId, candidates, savedExclusions: saved, aiProvider: aiProvider ?? null, balance: req.user.token_balance };
+    // why the AI pass may have little/nothing to read — shown BEFORE launch
+    const enabled = await db('api_providers').where('enabled', true).select('key', 'capabilities');
+    const newsProviderEnabled = enabled.some((p) => (p.capabilities ?? []).includes('news'));
+    const recentNews = await db('news_items').where('fetched_at', '>', new Date(Date.now() - 7 * 86_400_000)).count('* as c');
+    return {
+      runId,
+      candidates,
+      savedExclusions: saved,
+      aiProvider: aiProvider ?? null,
+      balance: req.user.token_balance,
+      newsProviderEnabled,
+      recentNewsCount: Number((recentNews[0] as { c: unknown }).c ?? 0),
+    };
   });
 
   const EstimateSchema = z.object({ excluded: z.array(z.string()).default([]) });
