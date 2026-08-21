@@ -61,15 +61,24 @@ export function clubQueryPack(clubName: string): string {
 
 export async function pullNews(
   db: Knex,
-  opts: { clubs?: string[]; fetchFn?: FetchFn } = {},
+  opts: { clubs?: string[]; maxClubs?: number; fetchFn?: FetchFn } = {},
 ): Promise<{ fetched: number; inserted: number; mapped: number }> {
   const apiKey = config.keys.newsdata;
   if (!apiKey) throw new PullError('AUTH', 'NEWSDATA_KEY not configured');
 
   const teams = await db('teams').whereNotNull('fpl_id').select('uid', 'name', 'short_name');
   const clubs = opts.clubs ?? teams.map((t) => t.name);
-  // rotate clubs across pulls: pick the 5 least-recently pulled (tracked via pull log)
-  const chosen = clubs.slice(0, 5);
+  // A user-triggered Run sweeps every club (one request each — well inside
+  // the free credit budget). Background polls take a small rotating window
+  // so the same 5 clubs aren't the only ones ever covered: the offset walks
+  // forward by the number of pulls already logged.
+  const maxClubs = opts.maxClubs ?? 5;
+  let chosen = clubs;
+  if (clubs.length > maxClubs) {
+    const countRows = (await db('api_pull_log').where({ provider: 'newsdata' }).count('* as c')) as { c: string }[];
+    const offset = (Number(countRows[0]?.c ?? 0) * maxClubs) % clubs.length;
+    chosen = [...clubs.slice(offset), ...clubs.slice(0, offset)].slice(0, maxClubs);
+  }
 
   let fetched = 0;
   let inserted = 0;

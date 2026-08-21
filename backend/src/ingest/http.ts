@@ -31,6 +31,8 @@ export async function fetchWithSnapshot(
     endpoint: string;
     url: string;
     headers?: Record<string, string>;
+    method?: 'GET' | 'POST';
+    requestBody?: string; // form-encoded or JSON — caller sets Content-Type
     paramsHash?: string;
     timeoutMs?: number;
     fetchFn?: FetchFn;
@@ -48,7 +50,9 @@ export async function fetchWithSnapshot(
     let response: Response;
     try {
       response = await fetchFn(opts.url, {
+        method: opts.method ?? 'GET',
         headers: opts.headers,
+        body: opts.requestBody,
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {

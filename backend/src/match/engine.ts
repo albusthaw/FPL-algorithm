@@ -35,6 +35,7 @@ export interface MatchEngineResult {
 export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngineResult> {
   const cfg = await getConfig<MatchEngineConfig>(db, 'match_engine');
   const chipRules = await getConfig<ChipRules>(db, 'chip_rules');
+  const scoring = await getConfig<{ goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number }>(db, 'scoring_rules');
 
   const fxPreds = await db('fixture_predictions as fp')
     .join('fixtures as f', 'f.fixture_uid', 'fp.fixture_uid')
@@ -221,9 +222,27 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
     cur.sigma = Math.sqrt(cur.sigma ** 2 + Number(row.variance));
     nextEventXpts.set(row.player_uid, cur);
   }
+  // ordered by SIMULATED P90 ceiling (the plan's §5.3.3 "captaincy ceiling").
+  // A normal ±1.28σ approximation misprices captaincy: attacker points are
+  // right-skewed (a 2-goal haul jumps 8+), a defender's clean-sheet day is
+  // bounded. Small seeded simulation over the composer's own probabilities —
+  // deterministic per run, ~40 players × 2000 draws.
+  const nextEventRows = new Map<string, typeof pfp>();
+  for (const row of pfp) {
+    if (row.event !== nextEvent) continue;
+    (nextEventRows.get(row.player_uid) ?? nextEventRows.set(row.player_uid, []).get(row.player_uid)!).push(row);
+  }
+  const metaByUid = new Map(matrix.map((m) => [m.player_uid, m]));
+  const rng = mulberry32((runId * 2654435761) >>> 0);
   const captaincy = [...nextEventXpts.entries()]
-    .map(([uid, v]) => ({ uid, doubled: 2 * v.xpts, ceiling: 2 * (v.xpts + 1.28 * v.sigma) }))
-    .sort((a, b) => b.doubled - a.doubled)
+    .sort((a, b) => b[1].xpts - a[1].xpts)
+    .slice(0, 40) // preselect by mean; the sim decides the order
+    .map(([uid, v]) => ({
+      uid,
+      doubled: 2 * v.xpts,
+      ceiling: 2 * simulateP90(nextEventRows.get(uid) ?? [], metaByUid.get(uid)?.position ?? 'MID', scoring, rng),
+    }))
+    .sort((a, b) => b.ceiling - a.ceiling || b.doubled - a.doubled)
     .slice(0, cfg.captaincy_pool_size);
   captaincy.forEach((c, idx) => {
     targetRows.push({
@@ -234,7 +253,7 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
       player_uid: c.uid,
       rank: idx + 1,
       score: c.doubled.toFixed(3),
-      reasons: JSON.stringify({ doubled_xpts: r2(c.doubled), ceiling: r2(c.ceiling), label: idx === 0 ? 'safe_pick' : c.ceiling > (captaincy[0]?.ceiling ?? 0) ? 'ceiling_pick' : 'alternative' }),
+      reasons: JSON.stringify({ doubled_xpts: r2(c.doubled), ceiling: r2(c.ceiling), label: idx === 0 ? 'top_pick' : c.doubled > (captaincy[0]?.doubled ?? 0) ? 'safe_pick' : 'alternative' }),
     });
     targetCount++;
   });
@@ -406,4 +425,74 @@ function quantile(values: number[], q: number): number {
 
 function r2(x: number): number {
   return Number(x.toFixed(2));
+}
+
+/** Deterministic PRNG — engine outputs must be reproducible per run_id. */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function poissonDraw(rng: () => number, lambda: number): number {
+  if (lambda <= 0) return 0;
+  const limit = Math.exp(-lambda);
+  let k = 0;
+  let p = 1;
+  do {
+    k++;
+    p *= rng();
+  } while (p > limit && k < 12);
+  return k - 1;
+}
+
+/**
+ * Simulated 90th-percentile single-event points from the composer's own
+ * per-fixture probabilities. Bonus is tied to the simulated performance
+ * (hauls carry bonus), not to the mean — that is the whole point of a
+ * ceiling. ⚙ draws=2000.
+ */
+export function simulateP90(
+  rows: { p60: string | number; p_any: string | number; e_goals: string | number; e_assists: string | number; p_cs: string | number; p_defcon: string | number; e_saves: string | number; e_bonus: string | number }[],
+  position: string,
+  scoring: { goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number },
+  rng: () => number,
+): number {
+  if (rows.length === 0) return 0;
+  const goalPts = scoring.goal[position] ?? 5;
+  const csPts = scoring.clean_sheet[position] ?? 0;
+  const draws = 2000;
+  const totals: number[] = new Array(draws);
+  for (let i = 0; i < draws; i++) {
+    let pts = 0;
+    for (const row of rows) {
+      const p60 = Number(row.p60);
+      const pAny = Number(row.p_any);
+      const appearanceRoll = rng();
+      const played60 = appearanceRoll < p60;
+      const playedAny = appearanceRoll < pAny;
+      if (!playedAny) continue;
+      pts += played60 ? 2 : 1;
+      const goals = poissonDraw(rng, Number(row.e_goals));
+      const assists = poissonDraw(rng, Number(row.e_assists));
+      pts += goals * goalPts + assists * scoring.assist;
+      if (played60 && rng() < Number(row.p_cs)) pts += csPts;
+      if (played60 && rng() < Number(row.p_defcon)) pts += 2;
+      if (position === 'GK') pts += Math.floor(poissonDraw(rng, Number(row.e_saves)) / 3);
+      // bonus rides the performance: hauls take 3, returns take 1-2,
+      // quiet games take the (small) base chance from the mean model
+      const returns = goals + assists;
+      if (returns >= 2) pts += 3;
+      else if (returns === 1) pts += rng() < 0.55 ? 2 : 1;
+      else if (rng() < Math.min(0.25, Number(row.e_bonus) / 3)) pts += 1;
+    }
+    totals[i] = pts;
+  }
+  totals.sort((a, b) => a - b);
+  return totals[Math.floor(0.9 * draws)]!;
 }

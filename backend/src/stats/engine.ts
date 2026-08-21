@@ -672,8 +672,8 @@ export async function rerankMatrix(db: Knex, runId: number): Promise<void> {
   await db.raw(
     `WITH ranked AS (
        SELECT pm.id,
-              DENSE_RANK() OVER (ORDER BY pm.overall_score DESC) AS r_overall,
-              DENSE_RANK() OVER (PARTITION BY p.position ORDER BY pm.overall_score DESC) AS r_position
+              DENSE_RANK() OVER (ORDER BY pm.overall_score DESC, pm.xpts_next3 DESC, pm.xpts_next1 DESC) AS r_overall,
+              DENSE_RANK() OVER (PARTITION BY p.position ORDER BY pm.overall_score DESC, pm.xpts_next3 DESC, pm.xpts_next1 DESC) AS r_position
        FROM player_matrix pm JOIN players p ON p.uid = pm.player_uid
        WHERE pm.run_id = ?
      )

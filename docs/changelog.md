@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.2.0 — 2026-08-21 · schema 8
+
+No migration. Every provider pull live-verified with real keys; the AI pass
+now covers the whole news set; captaincy picks by simulated ceiling.
+
+- **News pull**: club rotation actually rotates (offset walks the pull log);
+  a user-triggered Run sweeps ALL 20 clubs (one request each), background
+  polls keep the small rotating window. Live-verified with a real
+  NewsData.io key: real articles inserted, players linked.
+- **Sportmonks adapter rewritten against the live v3 API**: sidelined is a
+  TEAM include (`teams?include=sidelined.player` — it no longer exists on
+  Player), cursor pagination handled (next_cursor is a full URL; per_page is
+  refused alongside cursor). Live-verified: 80 sidelined records across
+  pages (free plan = Danish/Scottish only; EPL resolution needs a paid plan).
+- **TheSportsDB**: switched to `search_all_teams` by league name (the id
+  lookup serves a different roster on the demo key) and added the FPL-short-
+  name → registered-name map (Man City → Manchester City …). Live: 10 club
+  badges matched.
+- **Understat**: the league page stopped embedding data (2026 redesign) —
+  the adapter now uses the site's own `getPlayersStats` endpoint with the
+  legacy script extraction as fallback. Live: 537 players' xG pulled.
+- **AI pass fixed for reasoning models**: a truncated batch (output-length
+  cap) now splits in two and retries once each — the single auto-split the
+  AI plan §7 requires (it previously fell into the unrepairable repair
+  path and the whole batch went stale). DeepSeek gets max_tokens 8192.
+  Live: 21/21 news-bearing players analysed (was 2).
+- **Captaincy by simulated P90 ceiling** (engines plan §5.3.3): a seeded
+  2,000-draw simulation over the composer's own probabilities replaces the
+  normal ±1.28σ approximation, which overpriced a defender's bounded
+  clean-sheet floor against a striker's right-skewed haul ceiling.
+  Live: Haaland over Gabriel, for the right reason.
+- **Distinct ranks**: expected-points tiebreaks in the ranking — no more
+  five-way tie at #1 (one per position at the score cap).
+- Run pre-flight explains eligibility before launch; DeepSeek default model
+  is deepseek-v4-flash.
+
 ## v1.1.0 — 2026-08-21 · schema 8
 
 No migration. API keys in the admin panel, AI model choice, engine cold-start

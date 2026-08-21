@@ -30,51 +30,71 @@ const SidelinedSchema = z
 
 export async function pullSportmonksSidelined(db: Knex, fetchFn?: FetchFn): Promise<{ records: number; resolved: number }> {
   if (!config.keys.sportmonks) throw new PullError('AUTH', 'SPORTMONKS_TOKEN not configured');
-  const url = `${SPORTMONKS_BASE}/players?include=sidelined&filters=playerHasSidelined&per_page=50`;
-  const snap = await fetchWithSnapshot(db, {
-    provider: 'sportmonks',
-    endpoint: 'players-sidelined',
-    url: `${url}&api_token=${config.keys.sportmonks}`,
-  });
-  const body = snap.body as { data?: unknown[]; rate_limit?: unknown; subscription?: unknown } | null;
-  if (!body || !('data' in body)) throw new PullError('SCHEMA_DRIFT', 'sportmonks envelope missing data');
+  // sidelined is a TEAM include in v3 (probed live 2026-08: it does not exist
+  // on Player, and /sidelined is not an endpoint). The nested .player include
+  // carries the name; identity resolves on player_id (never the relation id).
   let resolved = 0;
   let records = 0;
-  for (const raw of body.data ?? []) {
-    const player = raw as { id: number; display_name?: string; name?: string; sidelined?: unknown[] };
-    for (const sRaw of player.sidelined ?? []) {
-      const parsed = SidelinedSchema.safeParse(sRaw);
-      if (!parsed.success) continue;
-      const s = parsed.data;
-      records++;
-      const outcome = await resolveIdentity(db, {
-        provider: 'sportmonks',
-        providerId: String(s.player_id),
-        name: player.display_name ?? player.name ?? '',
-      });
-      if (outcome.kind !== 'cached' && outcome.kind !== 'code' && outcome.kind !== 'exact' && outcome.kind !== 'seed') continue;
-      resolved++;
-      const kind = (s.category ?? '').includes('susp') ? 'suspension' : 'injury';
-      await db.transaction(async (trx) => {
-        const existing = await trx('injuries')
-          .where({ player_uid: outcome.playerUid, kind, is_active: !s.completed, source: 'sportmonks' })
-          .first();
-        if (!existing) {
-          await trx('injuries').insert({
-            player_uid: outcome.playerUid,
-            source: 'sportmonks',
-            kind,
-            reason: s.category ?? '',
-            start_date: s.start_date ?? null,
-            expected_return_date: s.end_date ?? null,
-            is_active: !s.completed,
-            confidence: 0.85,
-          });
-        }
-      });
+  let cursor = '';
+  for (let page = 0; page < 5; page++) {
+    // per_page is refused alongside cursor (live-probed) — first page only
+    const url = `${SPORTMONKS_BASE}/teams?include=sidelined.player${cursor ? `&cursor=${cursor}` : '&per_page=50'}`;
+    const snap = await fetchWithSnapshot(db, {
+      provider: 'sportmonks',
+      endpoint: 'teams-sidelined',
+      url: `${url}&api_token=${config.keys.sportmonks}`,
+      fetchFn,
+    });
+    const body = snap.body as {
+      data?: unknown[];
+      pagination?: { has_more?: boolean; next_cursor?: string | null };
+    } | null;
+    if (!body || !('data' in body)) throw new PullError('SCHEMA_DRIFT', 'sportmonks envelope missing data');
+    for (const raw of body.data ?? []) {
+      const team = raw as { id: number; name?: string; sidelined?: unknown[] };
+      for (const sRaw of team.sidelined ?? []) {
+        const parsed = SidelinedSchema.safeParse(sRaw);
+        if (!parsed.success) continue;
+        const s = parsed.data;
+        const nested = (sRaw as { player?: { display_name?: string; name?: string } }).player;
+        records++;
+        const outcome = await resolveIdentity(db, {
+          provider: 'sportmonks',
+          providerId: String(s.player_id),
+          name: nested?.display_name ?? nested?.name ?? '',
+        });
+        if (outcome.kind !== 'cached' && outcome.kind !== 'code' && outcome.kind !== 'exact' && outcome.kind !== 'seed') continue;
+        resolved++;
+        const kind = (s.category ?? '').includes('susp') ? 'suspension' : 'injury';
+        await db.transaction(async (trx) => {
+          const existing = await trx('injuries')
+            .where({ player_uid: outcome.playerUid, kind, is_active: !s.completed, source: 'sportmonks' })
+            .first();
+          if (!existing) {
+            await trx('injuries').insert({
+              player_uid: outcome.playerUid,
+              source: 'sportmonks',
+              kind,
+              reason: s.category ?? '',
+              start_date: s.start_date ?? null,
+              expected_return_date: s.end_date ?? null,
+              is_active: !s.completed,
+              confidence: 0.85,
+            });
+          }
+        });
+      }
     }
+    if (!body.pagination?.has_more || !body.pagination.next_cursor) break;
+    // next_cursor is a FULL URL (observed live) — extract the bare token
+    try {
+      cursor = new URL(body.pagination.next_cursor).searchParams.get('cursor') ?? '';
+    } catch {
+      cursor = body.pagination.next_cursor;
+    }
+    if (!cursor) break;
   }
-  await logPull(db, { provider: 'sportmonks', capability: 'injuries', endpoint: 'players-sidelined', records, latencyMs: snap.latencyMs, status: 'ok' });
+  await logPull(db, { provider: 'sportmonks', capability: 'injuries', endpoint: 'teams-sidelined', records, status: 'ok' });
   return { records, resolved };
 }
 
@@ -142,12 +162,28 @@ export async function pullFootballDataMatches(db: Knex, fetchFn?: FetchFn): Prom
  * Metadata/media ONLY — never a stats or availability source. Everything is
  * strings; may serve HTML on rate-limit (treated as RATE_LIMITED).
  */
+/** FPL's short club names → TheSportsDB's registered names (live-probed). */
+const FPL_TO_TSDB: Record<string, string> = {
+  'man city': 'manchester city',
+  'man utd': 'manchester united',
+  spurs: 'tottenham hotspur',
+  "nott'm forest": 'nottingham forest',
+  newcastle: 'newcastle united',
+  leeds: 'leeds united',
+  brighton: 'brighton and hove albion',
+  bournemouth: 'afc bournemouth',
+  wolves: 'wolverhampton wanderers',
+  'west ham': 'west ham united',
+};
+
 export async function pullTheSportsDbBadges(db: Knex, fetchFn?: FetchFn): Promise<{ teams: number }> {
   const key = config.keys.thesportsdb || '3'; // '3' = free demo key (throttled, not production)
+  // search_all_teams by league NAME: lookup_all_teams.php?id=4328 serves a
+  // different (lower-league) roster on the demo key — live-probed 2026-08
   const snap = await fetchWithSnapshot(db, {
     provider: 'thesportsdb',
-    endpoint: 'lookup-league-teams',
-    url: `https://www.thesportsdb.com/api/v1/json/${key}/lookup_all_teams.php?id=4328`,
+    endpoint: 'search-league-teams',
+    url: `https://www.thesportsdb.com/api/v1/json/${key}/search_all_teams.php?l=${encodeURIComponent('English Premier League')}`,
     fetchFn,
   });
   type SportsDbBody = { teams?: { strTeam?: string; strBadge?: string; strTeamBadge?: string }[] } | null;
@@ -157,10 +193,15 @@ export async function pullTheSportsDbBadges(db: Knex, fetchFn?: FetchFn): Promis
   }
   if (!body || !('teams' in body)) throw new PullError('SCHEMA_DRIFT', 'thesportsdb missing expected top-level key');
   const ourTeams = await db('teams').whereNotNull('fpl_id').select('uid', 'name');
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z' ]/g, '').trim();
   let count = 0;
   for (const t of body.teams ?? []) {
     if (!t.strTeam) continue;
-    const match = ourTeams.find((x) => x.name.toLowerCase().replace(/[^a-z]/g, '') === t.strTeam!.toLowerCase().replace(/[^a-z]/g, ''));
+    const tsdbName = norm(t.strTeam);
+    const match = ourTeams.find((x) => {
+      const fplName = norm(x.name);
+      return fplName === tsdbName || FPL_TO_TSDB[fplName] === tsdbName;
+    });
     if (!match) continue;
     const badge = t.strBadge ?? t.strTeamBadge;
     if (!badge) continue;
@@ -169,7 +210,7 @@ export async function pullTheSportsDbBadges(db: Knex, fetchFn?: FetchFn): Promis
       .update({ strength: db.raw(`strength || ?::jsonb`, [JSON.stringify({ badge_url: badge })]) });
     count++;
   }
-  await logPull(db, { provider: 'thesportsdb', capability: 'media', endpoint: 'lookup-league-teams', records: count, latencyMs: snap.latencyMs, status: 'ok' });
+  await logPull(db, { provider: 'thesportsdb', capability: 'media', endpoint: 'search-league-teams', records: count, latencyMs: snap.latencyMs, status: 'ok' });
   return { teams: count };
 }
 
@@ -204,14 +245,37 @@ const UnderstatPlayerSchema = z
   .passthrough();
 
 export async function pullUnderstatLeague(db: Knex, startYear: number, fetchFn?: FetchFn): Promise<{ players: number; resolved: number }> {
+  // The league page stopped embedding playersData in 2026 (client-side
+  // loading now) — the site's own ajax endpoint serves the same shape as
+  // JSON. Fallback to the legacy script extraction if the endpoint drifts.
+  let playersData: unknown;
   const snap = await fetchWithSnapshot(db, {
     provider: 'understat',
-    endpoint: 'league',
-    url: `https://understat.com/league/EPL/${startYear}`,
-    headers: { 'User-Agent': config.fplUserAgent },
+    endpoint: 'players-stats',
+    url: 'https://understat.com/main/getPlayersStats/',
+    method: 'POST',
+    requestBody: `league=EPL&season=${startYear}`,
+    headers: {
+      'User-Agent': config.fplUserAgent,
+      'X-Requested-With': 'XMLHttpRequest',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    paramsHash: `EPL-${startYear}`,
     fetchFn,
   });
-  const playersData = extractUnderstatVar(snap.bodyText, 'playersData');
+  const ajax = snap.body as { success?: boolean; players?: unknown } | null;
+  if (ajax?.success && Array.isArray(ajax.players)) {
+    playersData = ajax.players;
+  } else {
+    const legacy = await fetchWithSnapshot(db, {
+      provider: 'understat',
+      endpoint: 'league',
+      url: `https://understat.com/league/EPL/${startYear}`,
+      headers: { 'User-Agent': config.fplUserAgent },
+      fetchFn,
+    });
+    playersData = extractUnderstatVar(legacy.bodyText, 'playersData');
+  }
   const parsed = z.array(UnderstatPlayerSchema).safeParse(playersData);
   if (!parsed.success) throw new PullError('SCHEMA_DRIFT', 'understat playersData shape drifted', parsed.error.issues.slice(0, 5));
   let resolved = 0;
