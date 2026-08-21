@@ -523,14 +523,24 @@ describe('statengineexpansion X2/X3 — set-piece EV and returns-driven bonus', 
     eConcedePts: -0.5, lambdaOpponent: 1.1,
   };
 
-  it('first-choice penalty taker gains xPts vs identical non-taker', () => {
+  it('penalty EV is self-consistent: no double-count for incumbent takers', () => {
+    // v1.4.0: the deduction (0.181) equals what the explicit pen term re-adds
+    // for an every-week taker — the SAME player's history already contains
+    // those pens, so being flagged taker must be ~neutral, never a windfall
     const taker = composeXpts({ ...premium, pensOrder: 1, spCfg, bonusCfg }, rules, bonusProfiles);
     const nonTaker = composeXpts({ ...premium, pensOrder: null, spCfg, bonusCfg }, rules, bonusProfiles);
-    expect(taker.eGoals).toBeGreaterThan(nonTaker.eGoals);
-    expect(taker.total).toBeGreaterThan(nonTaker.total);
-    // pen EV net of the xG deduction ≈ 0.28·1.15·0.85·0.76 − 0.06·exposure·mult ≈ +0.14 goals
-    expect(taker.eGoals - nonTaker.eGoals).toBeGreaterThan(0.08);
-    expect(taker.eGoals - nonTaker.eGoals).toBeLessThan(0.25);
+    expect(taker.eGoals).toBeGreaterThanOrEqual(nonTaker.eGoals);
+    expect(Math.abs(taker.eGoals - nonTaker.eGoals)).toBeLessThan(0.05);
+  });
+
+  it('with non-penalty xG data the composer uses it exactly (no estimate)', () => {
+    // npxg90 known: pens removed at the source, explicit EV re-added — a
+    // NEW taker whose history holds no pens gains the full pen EV
+    const newTaker = composeXpts({ ...premium, npxg90: 0.72, pensOrder: 1, spCfg, bonusCfg }, rules, bonusProfiles);
+    const nonTaker = composeXpts({ ...premium, pensOrder: null, spCfg, bonusCfg }, rules, bonusProfiles);
+    // pen EV ≈ 0.28·1.15·0.85·0.76 ≈ 0.208 goals/match at full exposure
+    expect(newTaker.eGoals - nonTaker.eGoals).toBeGreaterThan(0.15);
+    expect(newTaker.eGoals - nonTaker.eGoals).toBeLessThan(0.25);
   });
 
   it('corner/DFK first taker gains assist EV', () => {

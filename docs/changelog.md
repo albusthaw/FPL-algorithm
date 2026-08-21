@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.4.0 — 2026-08-21 · schema 10
+
+Migration 0010 (news engine + history ledger). The data-provider system
+revisit: a news storage engine + indexer that actually reaches the AI pass,
+historical depth up to ~20 years where sources allow, and news-driven
+human factors in the statistical engine.
+
+- **Why**: 129 successful news pulls had produced 174 stored articles, 64
+  player links and 38 covered players — AI batches of 2–17 players while
+  hundreds exist. Root causes: near-duplicate stories were DROPPED at pull
+  time; entity linking ran once at insert and never again; and the alias
+  matcher normalised text with the resolver's token-SORTING canonicaliser,
+  so a multi-word name only ever matched when it happened to be
+  alphabetical ("Luca Marchetti" linked, "Nico Duarte" never could).
+- **News storage engine**: exact URL repeats now bump seen_count/last_seen
+  (corroboration, not garbage); near-duplicate titles insert and cluster
+  into stories (story_id); signal categories stored per item; full-text
+  GIN index. Overlapping coverage corroborates a story — it never repeats
+  in the AI prompt (one representative per story per player) and never
+  double-counts in signals.
+- **News indexer** (new run stage, statistical): one systematic pass —
+  order-preserving entity linking (normaliseText), keyword signal
+  classification, story clustering — with a rolling 7-day re-scan so
+  alias improvements retroactively link older articles. Live: links 64→105,
+  covered players 38→52 on the first two passes.
+- **Pull throughput**: nextPage pagination, alternating query packs
+  (availability terms / broad club news for human-factor stories), explicit
+  per-sweep credit budgets (⚙ news_pull). Live: one sweep fetched 150
+  articles (15 requests × 10) vs ~10 per pull before.
+- **Human factors v2** (⚙ human_factors.news_signals): keyword-classified
+  categories — disciplinary, unprofessional conduct, transfer talk,
+  contract disputes, personal events, morale boosts, managerial change —
+  applied as bounded xPts multipliers (clamped [0.90, 1.03]) with
+  corroboration gating (negative categories need a tier-1/2 source or 2+
+  independent items). Evidence stored per player per run
+  (player_matrix.human_signals). No AI involved — scheduled runs stay
+  statistical by construction.
+- **Historical depth** (⚙ history_depth, default: last 7 days): per-source
+  reach researched and displayed on the Run screen ("Data window") and in
+  Admin → Data coverage, with a depth selector, career-aggregates toggle,
+  Backfill-now button and a resumable history_pulls ledger. Live-verified:
+  vaastav per-GW seasons (2016-17 →, 3 seasons imported = 40,055 match
+  rows) and the FPL element-summary career sweep — 600 players, 2,040
+  season rows, 0 failures, reaching back to **2006/07** (~20 years).
+  NewsData archive (paid: 6 mo/2 y/5 y), football-data (free: current
+  season), API-Football (free: 3 seasons) documented in the coverage table.
+- Fixed: NEWSDATA_KEY had been emptied in shared/.env — restored via the
+  admin key route; the AUTH circuit resets on the next successful pull.
+
 ## v1.3.0 — 2026-08-21 · schema 9
 
 Migration 0009 (`team_identities`). The statistical-engine expansion

@@ -4,7 +4,7 @@
  * player_matrix). Reads canonical tables as-of run start; NEVER mutates them.
  */
 import type { Knex } from 'knex';
-import { getConfig, getConfigVersion } from '../core/model-config.js';
+import { getConfig, getConfigVersion, DEFAULT_CONFIG } from '../core/model-config.js';
 import {
   fitTeamStrength,
   fixtureLambdas,
@@ -51,7 +51,11 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
   const spCfg = await getConfig<{ team_pens_per_match: number; taker_share: Record<string, number>; pen_conversion: number; pen_xg_deduction: number; corner_dfk_xa_bump: number }>(db, 'set_piece_ev').catch(() => null);
   const bonusCfg = await getConfig<{ fwd_mid: { base: number; slope: number; cap: number }; def: { base: number; slope: number; cs_term: number; cap: number }; gk: { base: number; cs_term: number; saves_norm: number; cap: number } }>(db, 'bonus_model').catch(() => null);
   const featureDecay = await getConfig<{ rate_xi_per_day: number }>(db, 'feature_decay').catch(() => null);
-  const humanCfg = await getConfig<{ ownership_momentum_weight: number; suspension_tightrope: { yellows: number; haircut_next3: number; haircut_next6: number } }>(db, 'human_factors').catch(() => null);
+  const humanCfg = await getConfig<{
+    ownership_momentum_weight: number;
+    suspension_tightrope: { yellows: number; haircut_next3: number; haircut_next6: number };
+    news_signals?: import('../news/signals.js').NewsSignalsConfig;
+  }>(db, 'human_factors').catch(() => null);
   const configVersion = await getConfigVersion(db, 'stat_score_weights');
 
   // ── events: the next 8 upcoming events as-of now
@@ -281,6 +285,25 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
   const setPieceRows = await db('set_piece_roles').select('player_uid', 'pens_order', 'dfk_order', 'corners_order');
   const setPieceByPlayer = new Map(setPieceRows.map((r) => [r.player_uid, r]));
 
+  // v1.4.0 human factors: news-signal categories per player (keyword
+  // classified in the indexer — statistical, no AI), corroboration-gated.
+  // Falls back to the compiled default when an upgraded DB's human_factors
+  // row predates the sub-key (belt to migration 0010's braces).
+  const signalCfg =
+    humanCfg?.news_signals ??
+    ((DEFAULT_CONFIG.human_factors as { news_signals?: import('../news/signals.js').NewsSignalsConfig }).news_signals ?? null);
+  let signalRowsByPlayer = new Map<string, { category: string; tier: number }[]>();
+  if (signalCfg) {
+    try {
+      const { playerSignalRows } = await import('../news/indexer.js');
+      signalRowsByPlayer = await playerSignalRows(db, signalCfg.window_days);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'news-signal load failed — running without human-factor news signals');
+      signalRowsByPlayer = new Map();
+    }
+  }
+  log.info({ players: signalRowsByPlayer.size }, 'news signals loaded');
+
   // X5: current-season yellows for the suspension tightrope
   const seasonStart = new Date(Date.UTC(asOf.getUTCMonth() >= 7 ? asOf.getUTCFullYear() : asOf.getUTCFullYear() - 1, 7, 1));
   const ycRows = (await db('player_match_stats')
@@ -324,6 +347,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     xptsN1: number;
     xptsN3: number;
     xptsN6: number;
+    humanSignals: Record<string, unknown> | null;
     pStartNext: number;
     pAppearanceNext: number;
     xcsNext: number;
@@ -542,15 +566,33 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       tightrope6 = humanCfg.suspension_tightrope.haircut_next6;
     }
 
+    // v1.4.0 news-driven human factors: bounded multipliers from corroborated
+    // signal categories (discipline, unprofessionalism, transfer/contract
+    // noise, personal events, morale, managerial churn)
+    let signalMult = { n1: 1, n3: 1, n6: 1 };
+    let humanSignals: Record<string, unknown> | null = null;
+    if (signalCfg) {
+      const rows = signalRowsByPlayer.get(p.uid) ?? [];
+      if (rows.length > 0) {
+        const { corroboratedCategories, signalMultipliers } = await import('../news/signals.js');
+        const cats = corroboratedCategories(rows as { category: import('../news/signals.js').SignalCategory; tier: number }[], signalCfg);
+        if (cats.length > 0) {
+          signalMult = signalMultipliers(cats, signalCfg);
+          humanSignals = { categories: cats, items: rows.length, mult: signalMult };
+        }
+      }
+    }
+
     scored.push({
       uid: p.uid,
       position: p.position,
       price: p.now_cost,
       features,
       xptsPerEvent,
-      xptsN1: sumEvents(1),
-      xptsN3: sumEvents(3) * tightrope3,
-      xptsN6: sumEvents(6) * tightrope6,
+      humanSignals,
+      xptsN1: sumEvents(1) * signalMult.n1,
+      xptsN3: sumEvents(3) * tightrope3 * signalMult.n3,
+      xptsN6: sumEvents(6) * tightrope6 * signalMult.n6,
       pStartNext,
       pAppearanceNext,
       xcsNext,
@@ -656,6 +698,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     xpts_next3: s.xptsN3.toFixed(3),
     xpts_next6: s.xptsN6.toFixed(3),
     xpts_per_event: JSON.stringify(upcomingEvents.map((ev) => ({ event: ev, xpts: r3(s.xptsPerEvent.get(ev) ?? 0) }))),
+    human_signals: s.humanSignals ? JSON.stringify(s.humanSignals) : null,
     stat_score: (statScores.get(s.uid) ?? 0).toFixed(2),
     ai_adjustment: 0,
     ai_rationale: '',

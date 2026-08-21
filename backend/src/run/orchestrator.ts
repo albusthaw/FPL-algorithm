@@ -90,15 +90,6 @@ export async function startRun(db: Knex, opts: RunOptions): Promise<{ runId: num
   return { runId, attached: false };
 }
 
-/** "2025-26"-style label for the season before the one now starting/running. */
-function previousSeasonLabel(now = new Date()): string {
-  // a football season YYYY-(YY+1) starts in August; before August we are
-  // still inside the season that started the previous calendar year
-  const seasonStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
-  const prevStart = seasonStartYear - 1;
-  return `${prevStart}-${String((prevStart + 1) % 100).padStart(2, '0')}`;
-}
-
 async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<void> {
   const stages: Record<string, number> = {};
   const degradations: string[] = [];
@@ -117,7 +108,10 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
     if (newsProvider) {
       const result = await guardedPull(db, newsProvider.key, 'latest', 'run', async () => {
         const { pullNews } = await import('../ingest/adapters/newsdata.js');
-        return pullNews(db, { maxClubs: 20 }); // a human-triggered Run sweeps every club
+        const { getConfig } = await import('../core/model-config.js');
+        const pullCfg = await getConfig<Record<string, number>>(db, 'news_pull').catch(() => null);
+        // a human-triggered Run sweeps every club with the run credit budget
+        return pullNews(db, { sweep: true, pull: pullCfg ?? undefined });
       });
       if (!result) degradations.push('news pull degraded — continuing with existing news');
     } else {
@@ -134,6 +128,20 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
     }
   });
 
+  // 1b. NEWS INDEX — systematic entity linking + signal classification +
+  // story clustering over everything pulled (statistical, no AI)
+  await timed('news_index', 8, async () => {
+    try {
+      const { indexNews } = await import('../news/indexer.js');
+      const r = await indexNews(db);
+      if (r.scanned > 0) {
+        log.info({ ...r }, 'news index pass');
+      }
+    } catch (err) {
+      degradations.push(`news index failed (${String(err).slice(0, 120)}) — AI pass sees pull-time links only`);
+    }
+  });
+
   // 2. INGEST — refresh the FPL anchor (never fatal if the last sync is fresh)
   await timed('ingest', 15, async () => {
     try {
@@ -142,17 +150,19 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
     } catch (err) {
       degradations.push(`FPL sync degraded (${String(err).slice(0, 120)}) — using last snapshot`);
     }
-    // first run on a fresh install: no per-match history yet → the models
-    // would run on priors alone. Import last season once, automatically
-    // (statistical data only — no AI involved).
+    // historical depth (v1.4.0): bring the DB up to the configured ⚙
+    // history_depth — the previous-season floor on a fresh install (the old
+    // behaviour), deeper vaastav seasons and the FPL career-aggregate sweep
+    // when an admin raised the depth. Resumable via the history_pulls ledger;
+    // statistical data only — no AI involved.
     try {
-      const historyCount = (await db('player_match_stats').count('* as c')) as { c: string }[];
-      if (Number(historyCount[0]?.c ?? 0) === 0) {
-        const { importHistoricalSeason } = await import('../ingest/historical.js');
-        const prevSeason = previousSeasonLabel();
-        const result = await importHistoricalSeason(db, prevSeason);
-        degradations.push(`first run: imported ${prevSeason} history automatically (${result.playerRows} match rows)`);
-      }
+      const { getConfig } = await import('../core/model-config.js');
+      const { ensureHistoryDepth, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+      const depthCfg = await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => DEFAULT_HISTORY_DEPTH);
+      const notes = await ensureHistoryDepth(db, depthCfg ?? DEFAULT_HISTORY_DEPTH, {
+        onProgress: (msg) => emit({ runId, stage: 'ingest', detail: msg, pct: 15 }),
+      });
+      degradations.push(...notes.filter((n) => n.includes('failed')));
     } catch (err) {
       degradations.push(`history import unavailable (${String(err).slice(0, 120)}) — predictions use season-start estimates`);
     }

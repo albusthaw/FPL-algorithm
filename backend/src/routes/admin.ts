@@ -10,6 +10,7 @@ import { getConfig, setConfig } from '../core/model-config.js';
 import { setEnabled as setFeatureEnabled } from '../core/kernel.js';
 import { resolveManually } from '../players/resolver.js';
 import { config } from '../core/config.js';
+import { log } from '../core/logger.js';
 import {
   PROVIDER_KEY_FIELDS,
   keyConfigured,
@@ -311,6 +312,34 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
   });
 
   // ── logs & charts
+  // ── historical depth (v1.4.0): per-provider reach, configured depth,
+  //    backfill ledger, and a human-triggered backfill (statistical only)
+  app.get('/api/admin/history', async (req) => {
+    requireAdmin(req);
+    const { historyCoverage, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+    const depthCfg = await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => DEFAULT_HISTORY_DEPTH);
+    const coverage = await historyCoverage(db, depthCfg ?? DEFAULT_HISTORY_DEPTH);
+    const ledger = await db('history_pulls').orderBy('id', 'desc').limit(50);
+    return { depth: depthCfg ?? DEFAULT_HISTORY_DEPTH, coverage, ledger };
+  });
+
+  const backfillState = { running: false };
+  app.post('/api/admin/backfill', async (req, reply) => {
+    requireAdmin(req);
+    if (backfillState.running) return reply.code(409).send({ error: 'a backfill is already running' });
+    const { ensureHistoryDepth, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+    const depthCfg = (await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => null)) ?? DEFAULT_HISTORY_DEPTH;
+    backfillState.running = true;
+    // runs in the background of THIS admin action (human-triggered,
+    // statistical ingestion only); progress lands in the history_pulls ledger
+    void ensureHistoryDepth(db, depthCfg)
+      .catch((err) => log.error({ err: String(err) }, 'backfill failed'))
+      .finally(() => {
+        backfillState.running = false;
+      });
+    return { started: true, depth: depthCfg };
+  });
+
   // ── data-coverage audit (statengineexpansion.md X6): proves every active
   //    player is ingested, scored and reflected in the latest rankings
   app.get('/api/admin/data-coverage', async (req) => {

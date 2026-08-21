@@ -42,13 +42,30 @@ export async function buildNewsBundles(db: Knex, runId: number): Promise<PlayerN
   const newsRows = await db('news_player_map as m')
     .join('news_items as n', 'n.id', 'm.news_id')
     .where('n.fetched_at', '>', cutoff)
-    .select('m.player_uid', 'n.id', 'n.title', 'n.description', 'n.source_name', 'n.source_tier', 'n.published_at', 'n.fetched_at')
+    .select(
+      'm.player_uid',
+      'n.id',
+      'n.story_id',
+      'n.title',
+      'n.description',
+      'n.source_name',
+      'n.source_tier',
+      'n.published_at',
+      'n.fetched_at',
+    )
     .orderBy('n.source_tier', 'asc')
     .orderBy('n.published_at', 'desc');
   const newsByPlayer = new Map<string, typeof newsRows>();
+  // one representative per STORY per player: rows arrive best-tier-first,
+  // newest-first, so the first row seen for a story is its representative —
+  // overlapping coverage corroborates a story, it never repeats in the prompt
+  const storySeen = new Set<string>();
   for (const n of newsRows) {
     const last = lastAnalysed.get(n.player_uid);
     if (last && new Date(n.fetched_at) <= last) continue; // only NEW news
+    const storyKey = `${n.player_uid}|${n.story_id ?? n.id}`;
+    if (storySeen.has(storyKey)) continue;
+    storySeen.add(storyKey);
     (newsByPlayer.get(n.player_uid) ?? newsByPlayer.set(n.player_uid, []).get(n.player_uid)!).push(n);
   }
 
