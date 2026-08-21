@@ -104,6 +104,17 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
 
   // 1. NEWS PULL — ≤2 enabled providers via capability routing (skippable)
   await timed('news_pull', 5, async () => {
+    // C1 (v1.4.3): the keyless RSS anchor pulls on every run — zero credits,
+    // conditional GETs make repeats near-free; failures never block the run
+    try {
+      const { pullRssFeeds, DEFAULT_RSS_FEEDS } = await import('../ingest/adapters/rss.js');
+      const { getConfig } = await import('../core/model-config.js');
+      const rssCfg = (await getConfig<typeof DEFAULT_RSS_FEEDS>(db, 'rss_feeds').catch(() => null)) ?? DEFAULT_RSS_FEEDS;
+      const rss = await pullRssFeeds(db, rssCfg);
+      if (rss.inserted > 0) log.info({ ...rss }, 'rss pull');
+    } catch (err) {
+      degradations.push(`rss pull degraded (${String(err).slice(0, 100)})`);
+    }
     const newsProvider = await routeCapability(db, 'news');
     if (newsProvider) {
       const result = await guardedPull(db, newsProvider.key, 'latest', 'run', async () => {

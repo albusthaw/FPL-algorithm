@@ -308,4 +308,58 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       .select('mi.*', 'th.short_name as home', 'ta.short_name as away', 'f.kickoff_utc');
     return { runId, insights };
   });
+
+  // B1 (v1.4.3, audit M1/M8): the full match preview — win/draw/loss, top
+  // scorelines, clean-sheet odds, and h2h context from OUR OWN fixture
+  // history (historical imports), no API dependency
+  app.get('/api/fixtures/:uid/preview', async (req, reply) => {
+    requireAuth(req);
+    const uid = (req.params as { uid: string }).uid;
+    const runId = await requireRun();
+    const fx = await db('fixtures as f')
+      .leftJoin('teams as th', 'th.uid', 'f.home_team_uid')
+      .leftJoin('teams as ta', 'ta.uid', 'f.away_team_uid')
+      .where('f.fixture_uid', uid)
+      .first('f.*', 'th.name as home_name', 'th.short_name as home', 'ta.name as away_name', 'ta.short_name as away');
+    if (!fx) return reply.code(404).send({ error: 'fixture not found' });
+    const pred = await db('fixture_predictions').where({ run_id: runId, fixture_uid: uid }).first();
+    if (!pred) return reply.code(404).send({ error: 'no prediction for this fixture in the latest run' });
+
+    const lh = Number(pred.lambda_home_blend);
+    const la = Number(pred.lambda_away_blend);
+    const fact = [1, 1, 2, 6, 24, 120, 720];
+    const pois = (l: number, k: number): number => (Math.exp(-l) * l ** k) / fact[k]!;
+    const scorelines: { score: string; p: number }[] = [];
+    for (let i = 0; i <= 5; i++) for (let j = 0; j <= 5; j++) scorelines.push({ score: `${i}-${j}`, p: pois(lh, i) * pois(la, j) });
+    scorelines.sort((a, b) => b.p - a.p);
+
+    // h2h: the last 5 meetings across every imported season
+    const meetings = await db('fixtures')
+      .where((q) =>
+        q
+          .where({ home_team_uid: fx.home_team_uid, away_team_uid: fx.away_team_uid })
+          .orWhere({ home_team_uid: fx.away_team_uid, away_team_uid: fx.home_team_uid }),
+      )
+      .whereIn('state', ['finished', 'checked'])
+      .whereNotNull('home_score')
+      .orderBy('kickoff_utc', 'desc')
+      .limit(5)
+      .select('season', 'kickoff_utc', 'home_team_uid', 'home_score', 'away_score');
+
+    return {
+      runId,
+      fixture: { uid, event: fx.event, kickoff: fx.kickoff_utc, home: fx.home, away: fx.away, homeName: fx.home_name, awayName: fx.away_name },
+      probabilities: { home: Number(pred.p_home), draw: Number(pred.p_draw), away: Number(pred.p_away) },
+      cleanSheets: { home: Number(pred.p_cs_home), away: Number(pred.p_cs_away) },
+      lambdas: { home: lh, away: la },
+      topScorelines: scorelines.slice(0, 5).map((s) => ({ score: s.score, p: Number(s.p.toFixed(3)) })),
+      oddsUsed: pred.odds_used,
+      h2h: meetings.map((m) => ({
+        season: m.season,
+        kickoff: m.kickoff_utc,
+        // orient to THIS fixture's home side
+        score: m.home_team_uid === fx.home_team_uid ? `${m.home_score}-${m.away_score}` : `${m.away_score}-${m.home_score}`,
+      })),
+    };
+  });
 }

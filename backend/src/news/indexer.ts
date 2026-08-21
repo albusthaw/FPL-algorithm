@@ -72,12 +72,34 @@ export async function indexNews(db: Knex): Promise<IndexResult> {
   const clusterCutoff = new Date(Date.now() - CLUSTER_DAYS * 86_400_000);
   const clusterPool = (await db('news_items')
     .where('fetched_at', '>', clusterCutoff)
-    .select('id', 'title', 'story_id')) as { id: number; title: string; story_id: number | null }[];
+    .select('id', 'title', 'story_id', 'signals')) as { id: number; title: string; story_id: number | null; signals: unknown }[];
   const poolNorm = clusterPool.map((p) => ({ ...p, norm: normaliseName(p.title) }));
+  // C6/N3 (v1.4.3): entity+category corroboration — the same story under an
+  // editorially different headline ("Arteta confirms Saka out" vs "Saka
+  // ruled out for six weeks") clusters when the items share a linked player
+  // AND a signal category inside the window
+  const poolSignals = new Map<number, Set<string>>(
+    clusterPool.map((p) => [p.id, new Set(Array.isArray(p.signals) ? (p.signals as string[]) : [])]),
+  );
+  const poolPlayers = new Map<number, Set<string>>();
+  if (clusterPool.length > 0) {
+    const links = (await db('news_player_map')
+      .whereIn('news_id', clusterPool.map((p) => p.id))
+      .select('news_id', 'player_uid')) as { news_id: number; player_uid: string }[];
+    for (const l of links) (poolPlayers.get(l.news_id) ?? poolPlayers.set(l.news_id, new Set()).get(l.news_id)!).add(l.player_uid);
+  }
+  const intersects = (a: Set<string> | undefined, b: Set<string> | undefined): boolean => {
+    if (!a || !b || a.size === 0 || b.size === 0) return false;
+    for (const x of a) if (b.has(x)) return true;
+    return false;
+  };
 
   for (const item of items) {
     const text = `${item.title}. ${item.description ?? ''}`;
-    const norm = ` ${normaliseText(text)} `;
+    // C6/N2 (v1.4.3): strip possessives BEFORE normalising — "Haaland's
+    // brace" otherwise normalises to "haalands" and defeats the exact
+    // phrase match (audit N2, live-verified)
+    const norm = ` ${normaliseText(text.replace(/(['’])s\b/g, ''))} `;
 
     // 1. entity linking (alias exact; mononyms need the club co-mentioned)
     const linkRows: { news_id: number; player_uid: string; match_kind: string; confidence: number }[] = [];
@@ -106,7 +128,14 @@ export async function indexNews(db: Knex): Promise<IndexResult> {
     const signals = classifySignals(text);
     if (signals.length > 0) signalsFound++;
 
-    // 3. story clustering: adopt the earliest similar title's story
+    // keep the corroboration maps current for items later in this batch
+    const itemPlayers = new Set([...seen, ...(poolPlayers.get(item.id) ?? [])]);
+    poolPlayers.set(item.id, itemPlayers);
+    const itemSignals = new Set<string>(signals);
+    poolSignals.set(item.id, itemSignals);
+
+    // 3. story clustering: adopt the earliest similar title's story; when the
+    //    headline differs editorially, entity+category overlap corroborates
     let storyId = item.story_id;
     if (storyId == null) {
       const itemNorm = normaliseName(item.title);
@@ -115,6 +144,15 @@ export async function indexNews(db: Knex): Promise<IndexResult> {
         if (trigramSimilarity(other.norm, itemNorm) >= CLUSTER_SIM) {
           storyId = other.story_id ?? other.id;
           break;
+        }
+      }
+      if (storyId == null && (itemPlayers.size > 0 || itemSignals.size > 0)) {
+        for (const other of poolNorm) {
+          if (other.id >= item.id) continue;
+          if (intersects(poolPlayers.get(other.id), itemPlayers) && intersects(poolSignals.get(other.id), itemSignals)) {
+            storyId = other.story_id ?? other.id;
+            break;
+          }
         }
       }
       if (storyId == null) storyId = item.id; // self-rooted story

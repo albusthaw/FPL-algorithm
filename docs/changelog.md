@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.4.3 — 2026-08-21 · schema 12 (no migration)
+
+engineupgradeplus.md release 3 — "the nervous system": the keyless RSS
+anchor, matchday-aware scheduling, indexer correctness, published match
+previews, the user-facing news surface, and the A6 quick features.
+
+- **C1 — RSS ingestion engine** (fixes N1): a keyless always-on news anchor
+  (`rss` provider row, outside the max-2 switch) pulling ⚙ `rss_feeds`
+  (BBC / Sky / Guardian by default) with conditional GETs (ETag /
+  Last-Modified persisted per feed) and a dependency-free RSS 2.0 parser
+  (CDATA, entities, tag stripping). Items flow into the SAME news_items
+  store, near-dup pool and indexer as NewsData — at zero credits.
+  Live-verified: BBC 81 items parsed, Sky 20; a CDN-blocked feed (Guardian
+  403s Node's HTTP client) fails alone and never blocks the others.
+- **C2 — matchday-aware scheduler**: one 15-minute tick classifies the
+  matchday phase (in-play / KO-window 90 min / deadline-24h / quiet) and
+  pulls RSS + NewsData on ⚙ `news_scheduler` cadences, indexing after each
+  pull; a 02:15 UTC price-watch bootstrap sync lands FPL price changes
+  before the 03:30 micro-run re-ranks. All statistical — the AI layer stays
+  structurally unreachable from the scheduler.
+- **C6 — indexer correctness**: possessives are stripped before
+  normalisation ("Haaland's brace" now links — N2); signal classification
+  gained a negation guard with clause-boundary scope ("will NOT be banned"
+  no longer classifies, "not banned, but refused to train" still does —
+  N4); story clustering corroborates by shared player + shared signal
+  category, so the same story under an editorially different headline
+  clusters ("Haaland suspended" ↔ "City dealt major blow" — N3); the AI
+  bundle window reads ⚙ `human_factors.news_signals.window_days` instead of
+  a hard-coded 7 (N5).
+- **B1 — match previews published** (fixes M1/M8): every insight row now
+  carries win/draw/loss probabilities and top scorelines (Poisson over the
+  blended lambdas); new `GET /api/fixtures/:uid/preview` adds clean-sheet
+  odds and h2h context from our own imported fixture history; the dashboard
+  match-engine card shows percentages and the most likely score.
+- **C5 — news product surface** (closes N6's product gap): dashboard
+  Newsroom feed (story-deduped, corroboration counts, signal badges, player
+  chips) via `GET /api/news/feed`; per-player news timeline on the player
+  page via `GET /api/players/:uid/news`; player photos cached under
+  `DATA_DIR/media/` (official FPL photo by fpl_code, TheSportsDB cutout
+  fallback) and served same-origin at `/api/media/players/…` because the
+  CSP blocks external image hosts by design (X2). Daily scheduler pass
+  keeps the cache warm.
+- **A6 — quick engine features** (fixes S5): per-player venue splits in L0
+  (xGI/90 at venue ÷ overall, shrunk toward neutral, bounded ±15%) scale
+  the fixture attack multiplier; FPL's ICT index joins the stat score as ⚙
+  `stat_score_weights.w8` (default 0.05) z-term; `ep_next` (FPL's own xPts
+  benchmark) and ICT appear as sortable display columns on the rankings.
+- Tests: 13 new (RSS parser on real-shape XML, negation matrix, possessive
+  linking + cross-headline clustering against the DB, matchday phases,
+  venue-split shrinkage). 148 backend tests green.
+
 ## v1.4.2 — 2026-08-21 · schema 12
 
 Migration 0012 (`user_teams.kind` + `source_run_id`). engineupgradeplus.md

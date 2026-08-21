@@ -24,6 +24,7 @@ export interface MatchRow {
   rc: number;
   shots?: number | null;
   keyPasses?: number | null;
+  wasHome?: boolean | null; // A6 (v1.4.3): venue splits
 }
 
 export interface PlayerFeatures {
@@ -47,6 +48,11 @@ export interface PlayerFeatures {
   rawXg90: number; // pre-shrinkage, for diagnostics
   rawXa90: number;
   daysSinceLastMatch: number | null;
+  // A6 (v1.4.3): attacking-output venue ratios (xGI/90 at venue ÷ overall),
+  // shrunk toward 1.0 and bounded — a real home specialist nudges up at
+  // home, small samples stay neutral
+  venueAttMultHome: number;
+  venueAttMultAway: number;
 }
 
 export interface PositionPriors {
@@ -143,6 +149,8 @@ export function computePlayerFeatures(
       rawXg90: 0,
       rawXa90: 0,
       daysSinceLastMatch: null,
+      venueAttMultHome: 1,
+      venueAttMultAway: 1,
     };
   }
 
@@ -243,7 +251,29 @@ export function computePlayerFeatures(
 
   const lastMatch = past[past.length - 1]!;
 
+  // A6 (v1.4.3): venue splits — attacking output (xGI/90, goals+assists
+  // fallback) at each venue relative to overall, shrunk toward neutral by
+  // venue minutes so a 3-match "home specialist" stays ~1.0
+  const xgi90Of = (rows: MatchRow[]): { rate: number; matches: number } => {
+    const min = rows.reduce((s, r) => s + r.minutes, 0);
+    const val = rows.reduce((s, r) => s + (r.xg ?? r.goals) + (r.xa ?? r.assists), 0);
+    return { rate: min > 0 ? (90 * val) / min : 0, matches: min / 90 };
+  };
+  const overallXgi = xgi90Of(window);
+  const K_VENUE = 8; // effective matches toward neutral
+  const venueMult = (wantHome: boolean): number => {
+    if (overallXgi.rate <= 0.02) return 1; // keepers / no output — neutral
+    const rows = window.filter((r) => r.wasHome === wantHome);
+    const v = xgi90Of(rows);
+    if (v.matches < 1) return 1;
+    const raw = v.rate / overallXgi.rate;
+    const shrunk = (v.matches * raw + K_VENUE * 1) / (v.matches + K_VENUE);
+    return Math.min(1.15, Math.max(0.85, shrunk));
+  };
+
   return {
+    venueAttMultHome: venueMult(true),
+    venueAttMultAway: venueMult(false),
     matchesUsed: window.length,
     minutesTotal: past.reduce((s, r) => s + r.minutes, 0),
     xg90: shrink(rawXg90, effMatches, priors.xg90, kAtt),

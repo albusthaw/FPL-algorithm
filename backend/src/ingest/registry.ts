@@ -7,6 +7,9 @@ import type { Knex } from 'knex';
  */
 export const PROVIDERS = [
   { key: 'fpl', name: 'FPL Official API', anchor: true, capabilities: ['fixtures', 'stats', 'injuries'] },
+  // C1 (v1.4.3): keyless news anchor — always on, zero credits, not counted
+  // by the max-2 switch (feeds ⚙ rss_feeds; BBC/Sky/Guardian by default)
+  { key: 'rss', name: 'RSS feeds (BBC / Sky / Guardian)', anchor: true, capabilities: ['news'] },
   { key: 'api_football', name: 'API-Football (api-sports.io)', anchor: false, capabilities: ['injuries', 'lineups', 'fixtures', 'stats', 'odds'] },
   { key: 'sportmonks', name: 'Sportmonks Football', anchor: false, capabilities: ['injuries', 'lineups', 'stats'] },
   { key: 'football_data', name: 'football-data.org', anchor: false, capabilities: ['fixtures'] },

@@ -16,11 +16,14 @@ type SortKey =
   | 'xpts_next6'
   | 'p_start_xi'
   | 'selected_by_pct'
+  | 'ep_next'
+  | 'ict_index'
   | 'injury_status';
 
 const NUMERIC_KEYS = new Set<SortKey>([
   'rank_overall', 'price', 'overall_score', 'ai_adjustment',
   'xpts_next1', 'xpts_next3', 'xpts_next6', 'p_start_xi', 'selected_by_pct',
+  'ep_next', 'ict_index',
 ]);
 
 export function PlayersPage(): ReactNode {
@@ -123,6 +126,8 @@ export function PlayersPage(): ReactNode {
                 <Th k="club">Club</Th><Th k="price">Price</Th><Th k="overall_score">Score</Th>
                 <Th k="ai_adjustment">AI</Th><Th k="xpts_next1">xP1</Th><Th k="xpts_next3">xP3</Th>
                 <Th k="xpts_next6">xP6</Th><Th k="p_start_xi">Start%</Th><Th k="selected_by_pct">Own%</Th>
+                {/* A6 (v1.4.3): FPL's own benchmark + ICT — display columns */}
+                <Th k="ep_next">FPL xP</Th><Th k="ict_index">ICT</Th>
                 <Th k="injury_status">Status</Th><th>Δ</th>
               </tr>
             </thead>
@@ -150,6 +155,8 @@ export function PlayersPage(): ReactNode {
                   <td className="mono">{n(p.xpts_next6)}</td>
                   <td className="mono">{pct(p.p_start_xi)}</td>
                   <td className="mono">{n(p.selected_by_pct)}</td>
+                  <td className="mono muted" title="FPL's own ep_next benchmark">{p.ep_next != null ? n(p.ep_next) : '—'}</td>
+                  <td className="mono muted">{p.ict_index != null ? n(p.ict_index) : '—'}</td>
                   <td>{p.injury_status && p.injury_status !== 'fit' ? <span className="badge bad">{p.injury_status.replace(/_/g, ' ')}</span> : <span className="badge ok">fit</span>}</td>
                   <td><RankChange delta={movement[p.uid]} /></td>
                 </tr>
@@ -170,12 +177,42 @@ interface PlayerDetail {
   recentMatches: { event: number; season: string; minutes: number; goals: number; assists: number; fpl_points: number; bonus: number; xg: string | null; xa: string | null; cbit: number; cbirt: number; was_home: boolean; kickoff_utc: string }[];
 }
 
+// C5 (v1.4.3): the per-player news timeline
+interface NewsTimelineItem {
+  id: number;
+  title: string;
+  description: string | null;
+  source_name: string;
+  source_domain: string;
+  source_tier: number;
+  published_at: string | null;
+  fetched_at: string;
+  signals: string[];
+  corroboration: number;
+}
+
+const TIMELINE_BADGE: Record<string, string> = {
+  disciplinary: 'discipline',
+  unprofessional: 'conduct',
+  transfer_talk: 'transfer',
+  contract_dispute: 'contract',
+  personal_event: 'personal',
+  morale_boost: 'boost',
+  managerial_change: 'manager',
+};
+
 export function PlayerDetailPage(): ReactNode {
   const { uid } = useParams<{ uid: string }>();
   const [data, setData] = useState<PlayerDetail | null>(null);
+  const [news, setNews] = useState<{ player: { photo: string | null }; timeline: NewsTimelineItem[] } | null>(null);
 
   useEffect(() => {
-    if (uid) void api.get<PlayerDetail>(`/api/players/${uid}`).then(setData);
+    if (!uid) return;
+    void api.get<PlayerDetail>(`/api/players/${uid}`).then(setData);
+    void api
+      .get<{ player: { photo: string | null }; timeline: NewsTimelineItem[] }>(`/api/players/${uid}/news`)
+      .then(setNews)
+      .catch(() => setNews(null));
   }, [uid]);
 
   if (!data) return <Loading />;
@@ -247,6 +284,29 @@ export function PlayerDetailPage(): ReactNode {
                 </table>
               </div>
             </div>
+            {news && news.timeline.length > 0 && (
+              <div className="card" data-testid="player-news-timeline">
+                <p className="kicker">News timeline</p>
+                {news.timeline.slice(0, 10).map((t) => (
+                  <div key={t.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+                    <p style={{ fontSize: '.85rem', lineHeight: 1.35 }}>
+                      {t.title}
+                      <span className="mono muted" style={{ fontSize: '.66rem' }}>
+                        {' '}— {t.source_name || t.source_domain} · {new Date(t.published_at ?? t.fetched_at).toLocaleDateString()}
+                        {t.corroboration > 1 ? ` · ${t.corroboration} sources` : ''}
+                      </span>
+                    </p>
+                    {(t.signals ?? []).length > 0 && (
+                      <p className="row" style={{ gap: 6, marginTop: 4 }}>
+                        {(t.signals ?? []).map((s) => (
+                          <span key={s} className={`badge ${s === 'morale_boost' ? 'ok' : 'bad'}`} style={{ fontSize: '.62rem' }}>{TIMELINE_BADGE[s] ?? s}</span>
+                        ))}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

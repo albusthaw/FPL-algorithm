@@ -88,7 +88,8 @@ describe('provider gates', () => {
       keys.map((k) => setProviderEnabled(db, k, true).then(() => 'ok', (e) => (e instanceof MaxProvidersError ? 'refused' : Promise.reject(e)))),
     );
     expect(results.filter((r) => r === 'ok').length).toBeLessThanOrEqual(2);
-    const enabled = await db('api_providers').where('enabled', true).whereNot('key', 'fpl').pluck('key');
+    // anchors (fpl, and rss since v1.4.3) are always-on and outside the switch
+    const enabled = await db('api_providers').where('enabled', true).whereRaw(`COALESCE(config->>'anchor','false') <> 'true'`).pluck('key');
     expect(enabled.length).toBeLessThanOrEqual(2);
   });
 

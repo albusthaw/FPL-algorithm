@@ -36,8 +36,8 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     recovery_per: 3,
     tackled_penalty: 0,
   },
-  // L12 stat_score weights (fpl-engines-plan.md §4.13)
-  stat_score_weights: { w1: 0.4, w2: 0.15, w3: 0.1, w4: 0.15, w5: 0.12, w6: 0.08 },
+  // L12 stat_score weights (fpl-engines-plan.md §4.13; w8 = ICT z-term, A6)
+  stat_score_weights: { w1: 0.4, w2: 0.15, w3: 0.1, w4: 0.15, w5: 0.12, w6: 0.08, w8: 0.05 },
   stat_score_caps: { unavailable: 25, doubtful: 60 },
   // L0 feature factory
   feature_factory: {
@@ -153,6 +153,21 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     poll_pages_per_club: 1,
     credit_budget_run: 45,
     credit_budget_poll: 6,
+  },
+  // C1 (v1.4.3): keyless RSS anchor feed registry (zero credits)
+  rss_feeds: {
+    feeds: [
+      { id: 'bbc', url: 'https://feeds.bbci.co.uk/sport/football/rss.xml', tier: 1 },
+      { id: 'sky', url: 'https://www.skysports.com/rss/12040', tier: 1 },
+      { id: 'guardian', url: 'https://www.theguardian.com/football/rss', tier: 2 },
+    ],
+    max_items_per_feed: 100,
+  },
+  // C2 (v1.4.3): matchday-aware scheduler cadences, minutes between pulls
+  // per phase (in_play / ko_window KO−90→+120 / deadline_24h / quiet)
+  news_scheduler: {
+    rss_minutes: { in_play: 15, ko_window: 15, deadline_24h: 30, quiet: 120 },
+    newsdata_minutes: { in_play: 60, ko_window: 90, deadline_24h: 120, quiet: 360 },
   },
   // v1.4.0 historical depth: default = live pulls only (last 7 days) with the
   // previous-season floor; admins raise it up to 10 per-GW seasons (vaastav)

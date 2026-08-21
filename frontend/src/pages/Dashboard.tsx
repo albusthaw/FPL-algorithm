@@ -25,17 +25,49 @@ interface Insight {
   def_leverage: string;
   mci: string;
   kickoff_utc: string | null;
-  reasons: { dominant?: string };
+  reasons: {
+    dominant?: string;
+    // B1 (v1.4.3): the published match preview
+    preview?: { p_home: number; p_draw: number; p_away: number; top_scorelines: { score: string; p: number }[] };
+  };
 }
+
+// C5 (v1.4.3): dashboard news feed with signal badges + player chips
+interface FeedItem {
+  id: number;
+  title: string;
+  source_name: string;
+  source_tier: number;
+  published_at: string | null;
+  fetched_at: string;
+  signals: string[];
+  story_items: string;
+  players: { uid: string; web_name: string; photo: string | null }[];
+}
+
+const SIGNAL_BADGE: Record<string, { label: string; bad: boolean }> = {
+  disciplinary: { label: 'discipline', bad: true },
+  unprofessional: { label: 'conduct', bad: true },
+  transfer_talk: { label: 'transfer', bad: true },
+  contract_dispute: { label: 'contract', bad: true },
+  personal_event: { label: 'personal', bad: true },
+  morale_boost: { label: 'boost', bad: false },
+  managerial_change: { label: 'manager', bad: true },
+};
 
 export function DashboardPage(): ReactNode {
   const [players, setPlayers] = useState<MatrixPlayer[] | null>(null);
   const [movement, setMovement] = useState<Record<string, number>>({});
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [insights, setInsights] = useState<Insight[]>([]);
+  const [feed, setFeed] = useState<FeedItem[]>([]);
   const [runId, setRunId] = useState<number | null>(null);
 
   useEffect(() => {
+    void api
+      .get<{ feed: FeedItem[] }>('/api/news/feed?limit=8')
+      .then((r) => setFeed(r.feed))
+      .catch(() => setFeed([]));
     void api
       .get<{ runId: number | null; players: MatrixPlayer[]; movement?: Record<string, number> }>('/api/players')
       .then((r) => {
@@ -110,16 +142,51 @@ export function DashboardPage(): ReactNode {
             </div>
 
             {insights.length > 0 && (
-              <div className="matchup-feature">
-                <p className="kicker">Match engine · highest leverage</p>
+              <div className="matchup-feature" data-testid="dashboard-previews">
+                <p className="kicker">Match engine · previews</p>
                 {insights.map((ins) => (
-                  <div key={ins.id} className="spread" style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
-                    <span className="serif" style={{ fontWeight: 600 }}>
-                      {ins.home} v {ins.away}
-                    </span>
-                    <span className="mono" style={{ fontSize: '.76rem' }}>
-                      {ins.reasons?.dominant === 'clean_sheet' ? 'CS' : 'ATT'} {n(ins.mci)}
-                    </span>
+                  <div key={ins.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+                    <div className="spread">
+                      <span className="serif" style={{ fontWeight: 600 }}>
+                        {ins.home} v {ins.away}
+                      </span>
+                      <span className="mono" style={{ fontSize: '.76rem' }}>
+                        {ins.reasons?.dominant === 'clean_sheet' ? 'CS' : 'ATT'} {n(ins.mci)}
+                      </span>
+                    </div>
+                    {ins.reasons?.preview && (
+                      <p className="mono" style={{ fontSize: '.72rem', marginTop: 4, opacity: 0.85 }}>
+                        {Math.round(ins.reasons.preview.p_home * 100)}% / {Math.round(ins.reasons.preview.p_draw * 100)}% / {Math.round(ins.reasons.preview.p_away * 100)}%
+                        {ins.reasons.preview.top_scorelines[0] && <> · likely {ins.reasons.preview.top_scorelines[0].score}</>}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {feed.length > 0 && (
+              <div className="card" data-testid="dashboard-news-feed">
+                <p className="kicker">Newsroom · latest stories</p>
+                {feed.map((f) => (
+                  <div key={f.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+                    <p style={{ fontSize: '.86rem', lineHeight: 1.35 }}>
+                      {f.title}
+                      <span className="mono muted" style={{ fontSize: '.68rem' }}> — {f.source_name}{Number(f.story_items) > 1 ? ` +${Number(f.story_items) - 1} more` : ''}</span>
+                    </p>
+                    {((f.signals ?? []).length > 0 || f.players.length > 0) && (
+                      <p className="row" style={{ gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                        {(f.signals ?? []).map((s) => (
+                          <span key={s} className={`badge ${SIGNAL_BADGE[s]?.bad ? 'bad' : 'ok'}`} style={{ fontSize: '.64rem' }}>{SIGNAL_BADGE[s]?.label ?? s}</span>
+                        ))}
+                        {f.players.slice(0, 3).map((p) => (
+                          <Link key={p.uid} to={`/players/${p.uid}`} className="badge" style={{ fontSize: '.64rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            {p.photo && <img src={p.photo} alt="" style={{ width: 14, height: 18, objectFit: 'cover', borderRadius: 2 }} />}
+                            {p.web_name}
+                          </Link>
+                        ))}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>

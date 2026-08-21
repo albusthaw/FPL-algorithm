@@ -51,6 +51,10 @@ export async function playerRoutes(app: FastifyInstance, opts: { db: Knex }): Pr
         'pm.injury_status',
         'pm.form_ewma',
         'pm.fdr_next3',
+        // A6 (v1.4.3, audit S5): FPL's own benchmark + ICT, ingested since
+        // v1.0 and never surfaced — display columns (never model inputs here)
+        db.raw(`(p.season_stats->>'ep_next')::numeric as ep_next`),
+        db.raw(`(p.season_stats->>'ict_index')::numeric as ict_index`),
       );
     if (q.position) query = query.where('p.position', q.position.toUpperCase());
     if (q.search) query = query.whereRaw('(p.web_name ILIKE ? OR p.full_name ILIKE ?)', [`%${q.search}%`, `%${q.search}%`]);

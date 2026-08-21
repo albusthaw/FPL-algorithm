@@ -90,6 +90,24 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
   const sideLeverage = new Map<string, { att: number; def: number; mci: number; event: number; teamUid: string; oppUid: string; fixtureUid: string }>();
 
   for (const f of windowFx) {
+    // B1 (v1.4.3, audit M1): the engine has computed win/draw/loss and full
+    // concession grids since day one and never exposed them — publish the
+    // preview into the insight reasons: probabilities + top scorelines
+    // (independent Poisson over the blended lambdas, display-grade).
+    const lh = Number(f.lambda_home_blend);
+    const la = Number(f.lambda_away_blend);
+    const pois = (l: number, k: number): number => (Math.exp(-l) * l ** k) / [1, 1, 2, 6, 24, 120, 720][k]!;
+    const grid: { score: string; p: number }[] = [];
+    for (let i = 0; i <= 5; i++) for (let j = 0; j <= 5; j++) grid.push({ score: `${i}-${j}`, p: pois(lh, i) * pois(la, j) });
+    const topScorelines = grid.sort((a, b) => b.p - a.p).slice(0, 3).map((s) => ({ score: s.score, p: r2(s.p) }));
+    const preview = {
+      p_home: Number(f.p_home),
+      p_draw: Number(f.p_draw),
+      p_away: Number(f.p_away),
+      top_scorelines: topScorelines,
+      lambda_home: r2(lh),
+      lambda_away: r2(la),
+    };
     for (const side of ['home', 'away'] as const) {
       const teamUid = side === 'home' ? f.home_team_uid : f.away_team_uid;
       const oppUid = side === 'home' ? f.away_team_uid : f.home_team_uid;
@@ -107,6 +125,7 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
         star_density: starDensity,
         dominant: att >= def ? 'attacking' : 'clean_sheet',
         volatility,
+        preview,
       };
       insightRows.push({
         run_id: runId,

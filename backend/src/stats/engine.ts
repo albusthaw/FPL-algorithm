@@ -245,7 +245,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
   const allStats = await db('player_match_stats')
     .whereNotNull('kickoff_utc')
     .where('kickoff_utc', '<', asOf)
-    .select('player_uid', 'kickoff_utc', 'minutes', 'starts', 'goals', 'assists', 'saves', 'cbit', 'cbirt', 'defcon_count', 'xg', 'npxg', 'xa', 'fpl_points', 'yc', 'rc');
+    .select('player_uid', 'kickoff_utc', 'minutes', 'starts', 'goals', 'assists', 'saves', 'cbit', 'cbirt', 'defcon_count', 'xg', 'npxg', 'xa', 'fpl_points', 'yc', 'rc', 'was_home');
   const rowsByPlayer = new Map<string, MatchRow[]>();
   for (const r of allStats) {
     const row: MatchRow = {
@@ -264,6 +264,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       fplPoints: r.fpl_points,
       yc: r.yc,
       rc: r.rc,
+      wasHome: r.was_home, // A6: venue splits
     };
     const list = rowsByPlayer.get(r.player_uid);
     if (list) list.push(row);
@@ -362,6 +363,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     transfersNet: number;
     formEwma: number;
     minutesEwma: number;
+    ict: number; // A6 (v1.4.3): FPL's ICT index — orthogonal eye-test term
   }
 
   const scored: PlayerScore[] = [];
@@ -480,7 +482,10 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           rc90: features.rc90,
           defconHitRate: features.defconHitRate,
           finishingMult,
-          fixtureMultAtt: isHome ? fp.attRatioHome : fp.attRatioAway,
+          // A6 (v1.4.3): the player's own venue split scales the fixture's
+          // team-level attack ratio (both bounded — a home specialist at
+          // home nudges up, thin samples stay neutral)
+          fixtureMultAtt: (isHome ? fp.attRatioHome : fp.attRatioAway) * (isHome ? features.venueAttMultHome : features.venueAttMultAway),
           pCsTeam: isHome ? fp.pred.pCsHome : fp.pred.pCsAway,
           eConcedePts: isHome ? fp.pred.eConcedePtsHome : fp.pred.eConcedePtsAway,
           lambdaOpponent: isHome ? fp.blendAway : fp.blendHome,
@@ -607,6 +612,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       transfersNet: p.transfers_in_event - p.transfers_out_event,
       formEwma: features.formEwma,
       minutesEwma: features.minutesEwma,
+      ict: Number((p.season_stats as { ict_index?: unknown } | null)?.ict_index ?? 0) || 0,
     });
   }
 
@@ -639,6 +645,11 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     // information — bounded (⚙ w7) so it can never dominate the model
     const zMomentum = z((s) => Math.sign(s.transfersNet) * Math.log1p(Math.abs(s.transfersNet)));
     const w7 = humanCfg?.ownership_momentum_weight ?? 0;
+    // A6 (v1.4.3, audit S5): ICT was ingested every 6 h and read by nothing —
+    // a small ⚙ w8 z-term folds FPL's own influence/creativity/threat index
+    // in as an orthogonal "eye test" signal
+    const zIct = z((s) => s.ict);
+    const w8 = weightsCfg.w8 ?? 0.05;
 
     const raw = new Map<string, number>();
     for (const s of group) {
@@ -650,7 +661,8 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           (weightsCfg.w4 ?? 0.15) * s.pStartNext +
           (weightsCfg.w5 ?? 0.12) * (zValue.get(s.uid) ?? 0) +
           (weightsCfg.w6 ?? 0.08) * (zFdr.get(s.uid) ?? 0) +
-          w7 * (zMomentum.get(s.uid) ?? 0),
+          w7 * (zMomentum.get(s.uid) ?? 0) +
+          w8 * (zIct.get(s.uid) ?? 0),
       );
     }
     // percentile map within position

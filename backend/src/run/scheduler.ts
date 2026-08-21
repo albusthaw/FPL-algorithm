@@ -12,6 +12,27 @@ import { syncFplBootstrap, syncFplFixtures } from '../ingest/adapters/fpl.js';
 import { startRun, getLiveRun } from './orchestrator.js';
 import { log } from '../core/logger.js';
 
+/** C2 (v1.4.3): where are we in the matchday cycle? Decides pull cadence. */
+export type MatchdayPhase = 'in_play' | 'ko_window' | 'deadline_24h' | 'quiet';
+
+export async function matchdayPhase(db: Knex, now = new Date()): Promise<MatchdayPhase> {
+  const t = now.getTime();
+  // in-play: any fixture live, or kicked off within the last 2 h
+  const live = await db('fixtures')
+    .where((q) => q.where('state', 'live').orWhereBetween('kickoff_utc', [new Date(t - 2 * 3600_000), new Date(t)]))
+    .first('fixture_uid');
+  if (live) return 'in_play';
+  // KO window: a kickoff inside the next 90 min (pressers → confirmed XIs)
+  const soon = await db('fixtures').whereBetween('kickoff_utc', [new Date(t), new Date(t + 90 * 60_000)]).first('fixture_uid');
+  if (soon) return 'ko_window';
+  const next = await db('gameweeks').where('is_next', true).first('deadline_time');
+  if (next) {
+    const ms = new Date(next.deadline_time).getTime() - t;
+    if (ms > 0 && ms < 24 * 3600_000) return 'deadline_24h';
+  }
+  return 'quiet';
+}
+
 export function startScheduler(db: Knex): void {
   // bootstrap poll: every 6 h baseline (deadline-window tightening handled
   // by the hourly check below)
@@ -46,6 +67,64 @@ export function startScheduler(db: Knex): void {
     }
   });
 
+  // C2 (v1.4.3): matchday-aware news cadence — one 15-min tick decides per
+  // phase (⚙ news_scheduler) whether the RSS anchor and the NewsData poll
+  // are due. Everything here is statistical ingestion + indexing; the AI
+  // layer stays structurally unreachable.
+  const lastPull = { rss: 0, newsdata: 0 };
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { getConfig } = await import('../core/model-config.js');
+      const phases = await getConfig<{ rss_minutes: Record<string, number>; newsdata_minutes: Record<string, number> }>(db, 'news_scheduler').catch(
+        () => ({ rss_minutes: { in_play: 15, ko_window: 15, deadline_24h: 30, quiet: 120 }, newsdata_minutes: { in_play: 60, ko_window: 90, deadline_24h: 120, quiet: 360 } }),
+      );
+      const phase = await matchdayPhase(db);
+      const now = Date.now();
+      let pulled = false;
+
+      if (now - lastPull.rss >= (phases.rss_minutes[phase] ?? 120) * 60_000) {
+        const { pullRssFeeds, DEFAULT_RSS_FEEDS } = await import('../ingest/adapters/rss.js');
+        const rssCfg = (await getConfig<typeof DEFAULT_RSS_FEEDS>(db, 'rss_feeds').catch(() => null)) ?? DEFAULT_RSS_FEEDS;
+        const r = await pullRssFeeds(db, rssCfg);
+        lastPull.rss = now;
+        pulled = true;
+        if (r.inserted > 0) log.info({ phase, ...r }, 'scheduled rss pull');
+      }
+
+      if (now - lastPull.newsdata >= (phases.newsdata_minutes[phase] ?? 360) * 60_000) {
+        const enabled = await db('api_providers').where({ key: 'newsdata', enabled: true }).first('key');
+        if (enabled) {
+          const { guardedPull } = await import('../ingest/gateway.js');
+          const r = await guardedPull(db, 'newsdata', 'latest', 'poll', async () => {
+            const { pullNews } = await import('../ingest/adapters/newsdata.js');
+            const pullCfg = await getConfig<Record<string, number>>(db, 'news_pull').catch(() => null);
+            return pullNews(db, { pull: pullCfg ?? undefined }); // rotating-club poll budget
+          });
+          if (r) pulled = true;
+        }
+        lastPull.newsdata = now; // even when disabled/refused — don't re-check every tick
+      }
+
+      if (pulled) {
+        const { indexNews } = await import('../news/indexer.js');
+        const r = await indexNews(db);
+        if (r.scanned > 0) log.info({ phase, ...r }, 'scheduled news index');
+      }
+    } catch (err) {
+      log.warn({ err: String(err) }, 'news cadence tick failed');
+    }
+  });
+
+  // C2 (v1.4.3): price-watch 02:15 UTC — FPL price changes land ~01:30–02:30;
+  // a bootstrap sync here catches them before the 03:30 micro-run re-ranks
+  cron.schedule('15 2 * * *', async () => {
+    try {
+      await syncFplBootstrap(db);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'price-watch bootstrap sync failed');
+    }
+  });
+
   // nightly micro-run 03:30 UTC (after price changes): stats-only re-rank.
   // ai: null — the AI layer is structurally unreachable from here.
   cron.schedule('30 3 * * *', async () => {
@@ -54,6 +133,17 @@ export function startScheduler(db: Knex): void {
       await startRun(db, { kind: 'micro_nightly', triggeredBy: null, ai: null });
     } catch (err) {
       log.warn({ err: String(err) }, 'nightly micro-run failed to start');
+    }
+  });
+
+  // C5 (v1.4.3): daily player-photo cache pass (DATA_DIR/media, served
+  // same-origin — the SPA's CSP blocks external image hosts by design)
+  cron.schedule('0 5 * * *', async () => {
+    try {
+      const { cachePlayerPhotos } = await import('../ingest/media.js');
+      await cachePlayerPhotos(db);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'photo cache pass failed');
     }
   });
 
