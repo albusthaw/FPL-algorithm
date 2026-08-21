@@ -194,7 +194,15 @@ export async function pullTheSportsDbBadges(db: Knex, fetchFn?: FetchFn): Promis
   if (!body || !('teams' in body)) throw new PullError('SCHEMA_DRIFT', 'thesportsdb missing expected top-level key');
   const ourTeams = await db('teams').whereNotNull('fpl_id').select('uid', 'name');
   const norm = (s: string): string => s.toLowerCase().replace(/[^a-z' ]/g, '').trim();
+  const matched = new Set<string>();
   let count = 0;
+  const applyBadge = async (uid: string, badge: string): Promise<void> => {
+    await db('teams')
+      .where('uid', uid)
+      .update({ strength: db.raw(`strength || ?::jsonb`, [JSON.stringify({ badge_url: badge })]) });
+    matched.add(uid);
+    count++;
+  };
   for (const t of body.teams ?? []) {
     if (!t.strTeam) continue;
     const tsdbName = norm(t.strTeam);
@@ -202,13 +210,31 @@ export async function pullTheSportsDbBadges(db: Knex, fetchFn?: FetchFn): Promis
       const fplName = norm(x.name);
       return fplName === tsdbName || FPL_TO_TSDB[fplName] === tsdbName;
     });
-    if (!match) continue;
+    if (!match || matched.has(match.uid)) continue;
     const badge = t.strBadge ?? t.strTeamBadge;
     if (!badge) continue;
-    await db('teams')
-      .where('uid', match.uid)
-      .update({ strength: db.raw(`strength || ?::jsonb`, [JSON.stringify({ badge_url: badge })]) });
-    count++;
+    await applyBadge(match.uid, badge);
+  }
+  // free keys cap search_all_teams at 10 rows (live-probed 2026-08) — backfill
+  // the remaining clubs one-by-one via searchteams.php, tolerating throttles
+  for (const club of ourTeams.filter((x) => !matched.has(x.uid))) {
+    const fplName = norm(club.name);
+    const query = FPL_TO_TSDB[fplName] ?? fplName;
+    try {
+      const one = await fetchWithSnapshot(db, {
+        provider: 'thesportsdb',
+        endpoint: 'search-team',
+        url: `https://www.thesportsdb.com/api/v1/json/${key}/searchteams.php?t=${encodeURIComponent(query)}`,
+        fetchFn,
+        retry: false,
+      });
+      const oneBody = one.body as SportsDbBody;
+      const hit = (oneBody?.teams ?? []).find((t) => t.strTeam && norm(t.strTeam) === query);
+      const badge = hit?.strBadge ?? hit?.strTeamBadge;
+      if (badge) await applyBadge(club.uid, badge);
+    } catch {
+      break; // throttled or down — keep what we have, next pull resumes
+    }
   }
   await logPull(db, { provider: 'thesportsdb', capability: 'media', endpoint: 'search-league-teams', records: count, latencyMs: snap.latencyMs, status: 'ok' });
   return { teams: count };

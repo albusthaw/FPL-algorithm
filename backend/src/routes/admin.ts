@@ -311,6 +311,48 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
   });
 
   // ── logs & charts
+  // ── data-coverage audit (statengineexpansion.md X6): proves every active
+  //    player is ingested, scored and reflected in the latest rankings
+  app.get('/api/admin/data-coverage', async (req) => {
+    requireAdmin(req);
+    const latestRun = await db('runs').where('status', 'complete').orderBy('id', 'desc').first('id');
+    const runId = latestRun ? Number(latestRun.id) : null;
+    const players = (await db.raw(
+      `SELECT p.uid, p.web_name, p.position, t.short_name AS club, p.status,
+              COALESCE(h.matches, 0)::int AS history_matches,
+              COALESCE(h.minutes, 0)::int AS history_minutes,
+              COALESCE(h.xg_rows, 0)::int AS xg_rows,
+              COALESCE(n.news7, 0)::int  AS news_7d,
+              COALESCE(i.idents, 0)::int AS identities,
+              (sp.player_uid IS NOT NULL) AS set_piece,
+              (pm.player_uid IS NOT NULL) AS in_latest_run
+       FROM players p
+       LEFT JOIN teams t ON t.uid = p.team_uid
+       LEFT JOIN (SELECT player_uid, count(*) AS matches, sum(minutes) AS minutes, count(xg) AS xg_rows
+                  FROM player_match_stats GROUP BY player_uid) h ON h.player_uid = p.uid
+       LEFT JOIN (SELECT m.player_uid, count(*) AS news7 FROM news_player_map m
+                  JOIN news_items ni ON ni.id = m.news_id
+                  WHERE ni.fetched_at > now() - interval '7 days' GROUP BY m.player_uid) n ON n.player_uid = p.uid
+       LEFT JOIN (SELECT player_uid, count(*) AS idents FROM player_identities GROUP BY player_uid) i ON i.player_uid = p.uid
+       LEFT JOIN set_piece_roles sp ON sp.player_uid = p.uid
+       LEFT JOIN player_matrix pm ON pm.player_uid = p.uid AND pm.run_id = ?
+       WHERE p.team_uid IS NOT NULL
+       ORDER BY p.web_name`,
+      [runId ?? -1],
+    )) as { rows: Record<string, unknown>[] };
+    const rows = players.rows;
+    const summary = {
+      runId,
+      totalActive: rows.length,
+      inLatestRun: rows.filter((r) => r.in_latest_run).length,
+      withHistory: rows.filter((r) => Number(r.history_matches) > 0).length,
+      withNews7d: rows.filter((r) => Number(r.news_7d) > 0).length,
+      withSetPiece: rows.filter((r) => r.set_piece).length,
+      zeroHistory: rows.filter((r) => Number(r.history_matches) === 0).length,
+    };
+    return { summary, players: rows };
+  });
+
   app.get('/api/admin/pull-log', async (req) => {
     requireAdmin(req);
     return {

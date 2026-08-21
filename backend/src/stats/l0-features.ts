@@ -17,6 +17,7 @@ export interface MatchRow {
   cbirt: number;
   defconCount: number;
   xg: number | null;
+  npxg?: number | null; // non-penalty xG — kills pen double-counting for takers
   xa: number | null;
   fplPoints: number;
   yc: number;
@@ -29,6 +30,7 @@ export interface PlayerFeatures {
   matchesUsed: number;
   minutesTotal: number;
   xg90: number; // shrunk
+  npxg90: number; // shrunk non-penalty xG rate (== xg90 when npxg data absent)
   xa90: number;
   saves90: number;
   cbit90: number;
@@ -37,7 +39,9 @@ export interface PlayerFeatures {
   rc90: number;
   formEwma: number; // decay-weighted mean FPL points per played match
   minutesEwma: number;
+  startedMinutesAvg: number; // decay-weighted mean minutes in STARTED matches (0 = no starts)
   startShare5: number; // decay-weighted start share, last 5 club matches he was in squad-window
+  startShareLong: number; // undecayed starts/matches over the full window — rotation history
   startedLast: boolean;
   defconHitRate: number; // empirical share of played matches hitting the DEFCON threshold
   rawXg90: number; // pre-shrinkage, for diagnostics
@@ -54,6 +58,29 @@ export interface PositionPriors {
   yc90: number;
   rc90: number;
   defconHitRate: number;
+}
+
+/**
+ * Price-continuous attacking prior (statengineexpansion.md X7). FPL prices
+ * ARE the market's published expected-returns prior — a £6.0 forward and a
+ * £15.5 forward must not shrink toward the same target. Attacking rates
+ * only; defensive volume stats keep the position×band priors.
+ */
+export interface PricePriorConfig {
+  elasticity: number;
+  mult_range: [number, number];
+  ref_price: Record<string, number>; // tenths
+  xg90_at_ref: Record<string, number>;
+  xa90_at_ref: Record<string, number>;
+}
+
+export function pricePriorRates(cfg: PricePriorConfig, position: string, price: number): { xg90: number; xa90: number } | null {
+  const ref = cfg.ref_price[position];
+  const xgAtRef = cfg.xg90_at_ref[position];
+  const xaAtRef = cfg.xa90_at_ref[position];
+  if (!ref || ref <= 0 || price <= 0 || xgAtRef == null || xaAtRef == null) return null;
+  const mult = Math.min(cfg.mult_range[1], Math.max(cfg.mult_range[0], Math.pow(price / ref, cfg.elasticity)));
+  return { xg90: xgAtRef * mult, xa90: xaAtRef * mult };
 }
 
 export const DEFAULT_PRIORS: Record<string, PositionPriors> = {
@@ -75,15 +102,20 @@ export function computePlayerFeatures(
   opts: {
     priors?: Record<string, PositionPriors>;
     price?: number; // tenths — selects the position×price-band prior
+    pricePrior?: PricePriorConfig; // X7 — continuous attacking prior from price
     shrinkageK?: number; // ⚙ effective matches
+    shrinkageKAttacking?: number; // ⚙ xG/xA stabilise slower — separate k
     decayXi?: number; // ⚙ per day
     minutesEwmaHalflife?: number; // ⚙ club matches
     defconThreshold?: number;
     defconMetric?: 'cbit' | 'cbirt';
   } = {},
 ): PlayerFeatures {
-  const priors = priorFor(opts.priors ?? DEFAULT_PRIORS, position, opts.price ?? 55);
+  const bandPriors = priorFor(opts.priors ?? DEFAULT_PRIORS, position, opts.price ?? 55);
+  const priceRates = opts.pricePrior ? pricePriorRates(opts.pricePrior, position, opts.price ?? 55) : null;
+  const priors: PositionPriors = priceRates ? { ...bandPriors, xg90: priceRates.xg90, xa90: priceRates.xa90 } : bandPriors;
   const k = opts.shrinkageK ?? 6;
+  const kAtt = opts.shrinkageKAttacking ?? k;
   const xi = opts.decayXi ?? 0.01;
   const past = rows
     .filter((r) => r.kickoff.getTime() < asOf.getTime())
@@ -94,6 +126,7 @@ export function computePlayerFeatures(
       matchesUsed: 0,
       minutesTotal: 0,
       xg90: priors.xg90,
+      npxg90: priors.xg90,
       xa90: priors.xa90,
       saves90: priors.saves90,
       cbit90: priors.cbit90,
@@ -102,7 +135,9 @@ export function computePlayerFeatures(
       rc90: priors.rc90,
       formEwma: 0,
       minutesEwma: 0,
+      startedMinutesAvg: 0,
       startShare5: 0,
+      startShareLong: 0,
       startedLast: false,
       defconHitRate: priors.defconHitRate,
       rawXg90: 0,
@@ -120,6 +155,8 @@ export function computePlayerFeatures(
   const anchorTime = past[past.length - 1]!.kickoff.getTime();
   let wMin = 0;
   let wXg = 0;
+  let wNpxg = 0;
+  let sawNpxg = false;
   let wXa = 0;
   let wSaves = 0;
   let wCbit = 0;
@@ -131,6 +168,8 @@ export function computePlayerFeatures(
     const w = Math.exp(-xi * days);
     wMin += w * r.minutes;
     wXg += w * (r.xg ?? 0);
+    if (r.npxg != null) sawNpxg = true;
+    wNpxg += w * (r.npxg ?? r.xg ?? 0); // rows without npxg fall back to xg
     wXa += w * (r.xa ?? 0);
     wSaves += w * r.saves;
     wCbit += w * r.cbit;
@@ -157,6 +196,18 @@ export function computePlayerFeatures(
     formDen += w;
   }
 
+  // minutes when STARTED (decay-weighted): rests and sub cameos must not
+  // poison a nailed starter's expected minutes (statengineexpansion.md X1)
+  let smNum = 0;
+  let smDen = 0;
+  for (const r of window) {
+    if (!r.starts) continue;
+    const days = (anchorTime - r.kickoff.getTime()) / 86_400_000;
+    const w = Math.exp(-xi * days);
+    smNum += w * r.minutes;
+    smDen += w;
+  }
+
   // minutes EWMA over the last club matches (half-life in matches)
   const halflife = opts.minutesEwmaHalflife ?? 4;
   const lambdaM = Math.log(2) / halflife;
@@ -176,6 +227,10 @@ export function computePlayerFeatures(
   const last15 = past.slice(-15);
   const share = (rows: MatchRow[]): number => (rows.length > 0 ? rows.filter((r) => r.starts).length / rows.length : 0);
   const startShare5 = last5.length > 0 ? 0.65 * share(last5) + 0.35 * share(last15) : 0;
+  // long-run rotation history (X8): a cameo player on a two-match starting
+  // streak is NOT a season-long starter — the horizon target needs the base
+  // rate, not the streak
+  const startShareLong = share(window);
 
   // DEFCON hit rate over played matches, last ⚙15
   const metric = opts.defconMetric ?? (position === 'DEF' || position === 'GK' ? 'cbit' : 'cbirt');
@@ -191,8 +246,11 @@ export function computePlayerFeatures(
   return {
     matchesUsed: window.length,
     minutesTotal: past.reduce((s, r) => s + r.minutes, 0),
-    xg90: shrink(rawXg90, effMatches, priors.xg90, k),
-    xa90: shrink(rawXa90, effMatches, priors.xa90, k),
+    xg90: shrink(rawXg90, effMatches, priors.xg90, kAtt),
+    // shrunk toward the same prior — the prior's small pen share only matters
+    // for thin samples, and thin samples are rarely designated takers
+    npxg90: sawNpxg ? shrink(rate90(wNpxg), effMatches, priors.xg90, kAtt) : shrink(rawXg90, effMatches, priors.xg90, kAtt),
+    xa90: shrink(rawXa90, effMatches, priors.xa90, kAtt),
     saves90: shrink(rate90(wSaves), effMatches, priors.saves90, k),
     cbit90: shrink(rate90(wCbit), effMatches, priors.cbit90, k),
     cbirt90: shrink(rate90(wCbirt), effMatches, priors.cbirt90, k),
@@ -200,7 +258,9 @@ export function computePlayerFeatures(
     rc90: shrink(rate90(wRc), effMatches, priors.rc90, k),
     formEwma: formDen > 0 ? formNum / formDen : 0,
     minutesEwma: mDen > 0 ? mNum / mDen : 0,
+    startedMinutesAvg: smDen > 0 ? smNum / smDen : 0,
     startShare5,
+    startShareLong,
     startedLast: lastMatch.starts,
     defconHitRate: shrink(defconHitsRaw, Math.min(playedRecent.length, 15) / 3, priors.defconHitRate, 2),
     rawXg90,

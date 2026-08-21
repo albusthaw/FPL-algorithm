@@ -38,6 +38,7 @@ export interface ComposeInput {
   eMin: number;
   // L0 shrunk rates
   xg90: number;
+  npxg90?: number; // non-penalty rate — replaces the crude deduction for takers
   xa90: number;
   saves90: number;
   yc90: number;
@@ -50,6 +51,22 @@ export interface ComposeInput {
   eConcedePts: number; // E[−⌊GA/2⌋] from the concession distribution
   lambdaOpponent: number; // for GK saves model
   defconOppMult?: number; // opponent-style multiplier ∈ [0.8, 1.25]
+  // X2 set-piece roles (statengineexpansion.md) — from set_piece_roles
+  pensOrder?: number | null; // 1 = first-choice taker
+  cornerDfkOrder?: number | null; // 1 = takes corners or direct FKs
+  spCfg?: {
+    team_pens_per_match: number;
+    taker_share: Record<string, number>;
+    pen_conversion: number;
+    pen_xg_deduction: number;
+    corner_dfk_xa_bump: number;
+  };
+  assistConv?: number; // ⚙ xA → FPL-assist conversion (FPL assists are broader)
+  bonusCfg?: {
+    fwd_mid: { base: number; slope: number; cap: number };
+    def: { base: number; slope: number; cs_term: number; cap: number };
+    gk: { base: number; cs_term: number; saves_norm: number; cap: number };
+  };
 }
 
 export interface XptsBreakdown {
@@ -100,8 +117,30 @@ export function composeXpts(input: ComposeInput, rules: ScoringRules, bonusProfi
   // L4 attacking: per-90 rates × exposure × fixture adjustment
   const exposure = input.eMin / 90;
   const finishing = input.finishingMult ?? 1;
-  const eGoals = input.xg90 * exposure * input.fixtureMultAtt * finishing;
-  const eAssists = input.xa90 * exposure * input.fixtureMultAtt;
+
+  // X2 penalties: explicit expected value for designated takers, with the
+  // taker's historical xG deducted so pens aren't counted twice
+  let penGoals = 0;
+  let xg90 = input.xg90;
+  let xa90 = input.xa90;
+  if (input.spCfg && input.pensOrder != null && input.pensOrder >= 1 && input.pensOrder <= 2) {
+    const share = input.spCfg.taker_share[String(input.pensOrder)] ?? 0;
+    penGoals =
+      input.spCfg.team_pens_per_match * input.fixtureMultAtt * share * input.spCfg.pen_conversion * (input.p60 > 0 ? Math.min(1, exposure / 0.8) : 0);
+    if (input.pensOrder === 1) {
+      // historical xG already contains the pens this taker took — the
+      // non-penalty rate removes them exactly; the flat deduction is only
+      // the fallback when npxg was never imported
+      xg90 = input.npxg90 != null ? input.npxg90 : Math.max(0, xg90 - input.spCfg.pen_xg_deduction);
+    }
+  }
+  // X2 dead-ball assist stream for corner/direct-FK first takers
+  if (input.spCfg && input.cornerDfkOrder === 1) {
+    xa90 += input.spCfg.corner_dfk_xa_bump;
+  }
+
+  const eGoals = xg90 * exposure * input.fixtureMultAtt * finishing + penGoals;
+  const eAssists = xa90 * exposure * input.fixtureMultAtt * (input.assistConv ?? 1);
   const goals = eGoals * (rules.goal[pos] ?? 5);
   const assists = eAssists * rules.assist;
 
@@ -124,20 +163,39 @@ export function composeXpts(input: ComposeInput, rules: ScoringRules, bonusProfi
     saves = expectedSavePoints(eSaves, rules.saves_per_point) + /* pen save EV */ 0.02 * rules.penalty_save * (input.eMin / 90);
   }
 
-  // L7 bonus v1: empirical profile lookup weighted by event probabilities
-  const bp = (profile: Record<string, number>): number => profile[pos] ?? 0;
-  const pScore = 1 - Math.exp(-eGoals);
-  const pAssist = 1 - Math.exp(-eAssists);
+  // L7 bonus. X3 (statengineexpansion.md): bonus rides RETURNS — a brace is
+  // almost always 3, a returning premium ~1.2-1.5 — so E[bonus] scales with
+  // E[goal involvement] instead of sitting on flat profile means. The
+  // legacy profile lookup remains the fallback when the config is absent.
   const pCsOn = input.p60 * input.pCsTeam;
-  const pHighSaves = pos === 'GK' ? Math.max(0, 1 - poissonPmf(eSaves, 0) - poissonPmf(eSaves, 1) - poissonPmf(eSaves, 2) - poissonPmf(eSaves, 3) - poissonPmf(eSaves, 4)) : 0;
-  const pNothing = Math.max(0, 1 - pScore - pAssist * 0.7 - pCsOn * 0.5 - pHighSaves);
-  const bonus =
-    input.pAny *
-    (pScore * (pCsOn > 0.3 ? bp(bonusProfiles.scored_and_cs) : bp(bonusProfiles.scored)) +
-      pAssist * (1 - pScore) * bp(bonusProfiles.assisted) +
-      pCsOn * pDefcon * bp(bonusProfiles.cs_and_defcon) +
-      pHighSaves * bp(bonusProfiles.high_saves) +
-      pNothing * bp(bonusProfiles.nothing));
+  let bonus: number;
+  if (input.bonusCfg) {
+    const eReturns = eGoals + eAssists;
+    if (pos === 'GK') {
+      const c = input.bonusCfg.gk;
+      bonus = Math.min(c.cap, c.base + c.cs_term * pCsOn * Math.min(1, input.saves90 / c.saves_norm));
+    } else if (pos === 'DEF') {
+      const c = input.bonusCfg.def;
+      bonus = Math.min(c.cap, c.base + c.slope * eReturns + c.cs_term * pCsOn * (0.4 + pDefcon));
+    } else {
+      const c = input.bonusCfg.fwd_mid;
+      bonus = Math.min(c.cap, c.base + c.slope * eReturns);
+    }
+    bonus *= input.pAny;
+  } else {
+    const bp = (profile: Record<string, number>): number => profile[pos] ?? 0;
+    const pScore = 1 - Math.exp(-eGoals);
+    const pAssist = 1 - Math.exp(-eAssists);
+    const pHighSaves = pos === 'GK' ? Math.max(0, 1 - poissonPmf(eSaves, 0) - poissonPmf(eSaves, 1) - poissonPmf(eSaves, 2) - poissonPmf(eSaves, 3) - poissonPmf(eSaves, 4)) : 0;
+    const pNothing = Math.max(0, 1 - pScore - pAssist * 0.7 - pCsOn * 0.5 - pHighSaves);
+    bonus =
+      input.pAny *
+      (pScore * (pCsOn > 0.3 ? bp(bonusProfiles.scored_and_cs) : bp(bonusProfiles.scored)) +
+        pAssist * (1 - pScore) * bp(bonusProfiles.assisted) +
+        pCsOn * pDefcon * bp(bonusProfiles.cs_and_defcon) +
+        pHighSaves * bp(bonusProfiles.high_saves) +
+        pNothing * bp(bonusProfiles.nothing));
+  }
 
   // L8 negatives
   const concededPenalty = pos === 'GK' || pos === 'DEF' ? input.p60 * input.eConcedePts : 0;

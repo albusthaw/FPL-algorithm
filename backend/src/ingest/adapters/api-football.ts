@@ -35,6 +35,8 @@ export function assertOk(body: unknown): { response: unknown[] } {
     if ('rateLimit' in errObj || 'ratelimit' in errObj) throw new PullError('RATE_LIMITED', JSON.stringify(errObj));
     if ('requests' in errObj) throw new PullError('QUOTA_EXHAUSTED', String(errObj.requests));
     if ('token' in errObj || 'Token' in errObj) throw new PullError('AUTH', JSON.stringify(errObj));
+    // "access" carries account-level denials (e.g. "Your account is suspended")
+    if ('access' in errObj) throw new PullError('AUTH', String(errObj.access));
     throw new PullError('SCHEMA_DRIFT', `api-football in-200 error: ${JSON.stringify(errors).slice(0, 300)}`);
   }
   if (parsed.data.response.length === 0) throw new PullError('EMPTY_OK', 'empty response with empty errors');
@@ -73,7 +75,17 @@ export async function pullInjuries(
 
   let resolved = 0;
   let queued = 0;
-  const teamMap = await apiFootballTeamMap(db);
+  let teamMap = await apiFootballTeamMap(db);
+  // without team context every row falls to manual review (§1.5 flood) —
+  // seed the 20-row team map lazily if the pre-season sprint hasn't run
+  if (teamMap.size === 0) {
+    try {
+      await seedTeamMap(db, season, fetchFn);
+      teamMap = await apiFootballTeamMap(db);
+    } catch {
+      /* plan-denied or offline: resolver still works, just queues more */
+    }
+  }
 
   for (const raw of response) {
     const parsed = InjurySchema.safeParse(raw);
@@ -259,12 +271,9 @@ export async function pullOdds(db: Knex, fplFixtureUid: string, apiFootballFixtu
 
 /** Team id map seeded via the 20-row pre-season sprint; falls back to name match. */
 async function apiFootballTeamMap(db: Knex): Promise<Map<number, string>> {
-  const identities = await db('player_identities')
-    .where('provider', 'api_football_team')
-    .whereNull('tombstoned_at')
-    .select('provider_id', 'player_uid');
+  const identities = await db('team_identities').where('provider', 'api_football').select('provider_id', 'team_uid');
   const map = new Map<number, string>();
-  for (const row of identities) map.set(Number(row.provider_id), row.player_uid); // player_uid column reused for team uid
+  for (const row of identities) map.set(Number(row.provider_id), row.team_uid);
   return map;
 }
 
@@ -281,8 +290,8 @@ export async function seedTeamMap(db: Knex, season: number, fetchFn?: FetchFn): 
     const match = teams.find((x) => namesRoughlyEqual(x.name, t.name));
     if (!match) continue;
     await db.raw(
-      `INSERT INTO player_identities (player_uid, provider, provider_id, provider_name, confidence, matched_by)
-       VALUES (?, 'api_football_team', ?, ?, 1.0, 'seed') ON CONFLICT (provider, provider_id) DO NOTHING`,
+      `INSERT INTO team_identities (team_uid, provider, provider_id, provider_name, confidence, matched_by)
+       VALUES (?, 'api_football', ?, ?, 1.0, 'seed') ON CONFLICT (provider, provider_id) DO NOTHING`,
       [match.uid, String(t.id), t.name],
     );
     mapped++;
@@ -290,7 +299,23 @@ export async function seedTeamMap(db: Knex, season: number, fetchFn?: FetchFn): 
   return { mapped };
 }
 
+// FPL's short club names → the full names providers register (live-probed)
+const FPL_CLUB_FULL: Record<string, string> = {
+  mancity: 'manchestercity',
+  manutd: 'manchesterunited',
+  spurs: 'tottenhamhotspur',
+  nottmforest: 'nottinghamforest',
+  newcastle: 'newcastleunited',
+  leeds: 'leedsunited',
+  brighton: 'brightonhovealbion', // post-clean form ('and' is stripped)
+  bournemouth: 'afcbournemouth',
+  wolves: 'wolverhamptonwanderers',
+  westham: 'westhamunited',
+};
+
 function namesRoughlyEqual(a: string, b: string): boolean {
-  const clean = (s: string): string => s.toLowerCase().replace(/\b(fc|afc)\b/g, '').replace(/[^a-z]/g, '');
-  return clean(a) === clean(b) || clean(a).includes(clean(b)) || clean(b).includes(clean(a));
+  const clean = (s: string): string => s.toLowerCase().replace(/\b(fc|afc|and)\b/g, '').replace(/[^a-z]/g, '');
+  const ca = FPL_CLUB_FULL[clean(a)] ?? clean(a);
+  const cb = FPL_CLUB_FULL[clean(b)] ?? clean(b);
+  return ca === cb || ca.includes(cb) || cb.includes(ca);
 }
