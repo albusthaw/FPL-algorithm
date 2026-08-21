@@ -152,4 +152,12 @@ export class AnthropicAdapter implements AIProviderAdapter {
       return { ok: false, detail: String(err).slice(0, 200) };
     }
   }
+
+  async listModels(): Promise<string[]> {
+    const fetchFn = this.opts.fetchFn ?? fetch;
+    const res = await fetchFn(`${API}/models?limit=100`, { headers: this.headers(), signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { data?: { id: string }[] };
+    return (json.data ?? []).map((m) => m.id).sort();
+  }
 }

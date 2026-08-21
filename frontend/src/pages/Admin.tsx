@@ -14,7 +14,7 @@ export function AdminPage(): ReactNode {
         <div className="tab-row" data-testid="admin-tabs">
           {(['users', 'providers', 'ai', 'weights', 'logs', 'queue'] as Tab[]).map((t) => (
             <button key={t} className={`chip-paper ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)} data-testid={`admin-tab-${t}`}>
-              {{ users: 'Users & tokens', providers: 'API switch (max 2)', ai: 'AI switch (max 1)', weights: 'Model weights', logs: 'Logs & costs', queue: 'Review queue' }[t]}
+              {{ users: 'Users & tokens', providers: 'Data providers (max 2)', ai: 'AI provider (max 1)', weights: 'Ranking weights', logs: 'Logs & costs', queue: 'Review queue' }[t]}
             </button>
           ))}
         </div>
@@ -130,7 +130,60 @@ function UsersTab(): ReactNode {
   );
 }
 
-interface ApiProvider { key: string; name: string; enabled: boolean; state: string; keyConfigured: boolean; config: { anchor?: boolean }; quota_used: number; quota_limit: number | null }
+interface KeyField { env: string; label: string; secret: boolean; set: boolean }
+interface ApiProvider { key: string; name: string; enabled: boolean; state: string; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; config: { anchor?: boolean }; quota_used: number; quota_limit: number | null }
+
+/** Enter/replace a provider's API key. The value is write-only: sent once,
+ *  stored server-side, never shown again — only “set (…last4)”. */
+function KeyEntry({ fields, hint, onSaved }: { fields: KeyField[]; hint: string | null; onSaved: () => void }): ReactNode {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [saved, setSaved] = useState('');
+  if (fields.length === 0) return null;
+
+  const save = async (f: KeyField): Promise<void> => {
+    const value = (values[f.env] ?? '').trim();
+    if (!value) return;
+    setBusy(true);
+    setErr('');
+    setSaved('');
+    try {
+      await api.put('/api/admin/keys', { env: f.env, value });
+      setValues((v) => ({ ...v, [f.env]: '' }));
+      setSaved('saved — active immediately');
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="stack" style={{ gap: 6, marginTop: 8 }}>
+      {fields.map((f) => (
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap' }} key={f.env}>
+          <input
+            className="input-paper"
+            style={{ width: 210, fontSize: '.8rem' }}
+            type={f.secret ? 'password' : 'text'}
+            placeholder={f.set ? `${f.label} — set${hint ? ` (${hint})` : ''}, paste to replace` : f.label}
+            value={values[f.env] ?? ''}
+            onChange={(e) => setValues((v) => ({ ...v, [f.env]: e.target.value }))}
+            autoComplete="off"
+            data-testid={`key-input-${f.env}`}
+          />
+          <button className="chip-paper" disabled={busy || !(values[f.env] ?? '').trim()} onClick={() => void save(f)} data-testid={`key-save-${f.env}`}>
+            Save
+          </button>
+        </div>
+      ))}
+      {saved && <span className="mono" style={{ fontSize: '.72rem', color: 'var(--green-up)' }}>{saved}</span>}
+      {err && <span className="mono" style={{ fontSize: '.72rem', color: 'var(--brick)' }}>{err}</span>}
+    </div>
+  );
+}
 
 function ProvidersTab(): ReactNode {
   const [data, setData] = useState<{ providers: ApiProvider[]; pairings: { name: string; pair: string[]; note: string }[] } | null>(null);
@@ -165,14 +218,24 @@ function ProvidersTab(): ReactNode {
               <span className={`badge ${p.state === 'ok' ? 'ok' : 'bad'}`}>{p.state}</span>
             </div>
             <p className="mono muted" style={{ fontSize: '.74rem', margin: '8px 0' }}>
-              key: {p.keyConfigured ? '✓ configured' : '✗ missing'} · quota {p.quota_used}{p.quota_limit ? `/${p.quota_limit}` : ''}
+              key: {p.keyConfigured ? `✓ set${p.keyHint ? ` (${p.keyHint})` : ''}` : p.requiresKey ? '✗ required to enable' : 'not needed'}
+              {' · '}quota {p.quota_used}{p.quota_limit ? `/${p.quota_limit}` : ''}
             </p>
             {p.config?.anchor ? (
-              <span className="badge brass">anchor — always on</span>
+              <span className="badge brass">always on</span>
             ) : (
-              <button className={`chip-paper ${p.enabled ? 'active' : ''}`} onClick={() => void toggle(p)} data-testid={`provider-toggle-${p.key}`}>
-                {p.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
-              </button>
+              <>
+                <button
+                  className={`chip-paper ${p.enabled ? 'active' : ''}`}
+                  onClick={() => void toggle(p)}
+                  disabled={!p.enabled && p.requiresKey && !p.keyConfigured}
+                  title={!p.enabled && p.requiresKey && !p.keyConfigured ? 'Add the API key below first' : undefined}
+                  data-testid={`provider-toggle-${p.key}`}
+                >
+                  {p.enabled ? 'Enabled — click to disable' : p.requiresKey && !p.keyConfigured ? 'Add API key to enable' : 'Disabled — click to enable'}
+                </button>
+                <KeyEntry fields={p.keyFields ?? []} hint={p.keyHint} onSaved={load} />
+              </>
             )}
           </div>
         ))}
@@ -189,7 +252,76 @@ function ProvidersTab(): ReactNode {
   );
 }
 
-interface AiProvider { key: string; name: string; alive: boolean; supports_vision: boolean; keyConfigured: boolean }
+interface AiProvider { key: string; name: string; alive: boolean; supports_vision: boolean; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; model: string | null }
+
+/** Model choice per AI provider: type one, or load the provider's live list. */
+function ModelPicker({ provider, onSaved }: { provider: AiProvider; onSaved: () => void }): ReactNode {
+  const [models, setModels] = useState<string[] | null>(null);
+  const [choice, setChoice] = useState(provider.model ?? '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [ok, setOk] = useState('');
+
+  const loadModels = async (): Promise<void> => {
+    setBusy(true);
+    setErr('');
+    try {
+      const r = await api.get<{ models: string[]; current: string | null }>(`/api/admin/ai-providers/${provider.key}/models`);
+      setModels(r.models);
+      if (!choice && r.current) setChoice(r.current);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async (): Promise<void> => {
+    if (!choice.trim()) return;
+    setBusy(true);
+    setErr('');
+    setOk('');
+    try {
+      await api.put(`/api/admin/ai-providers/${provider.key}/model`, { model: choice.trim() });
+      setOk('model saved');
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="stack" style={{ gap: 6, marginTop: 8 }}>
+      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+        {models ? (
+          <select className="input-paper" style={{ width: 210, fontSize: '.8rem' }} value={choice} onChange={(e) => setChoice(e.target.value)} data-testid={`model-select-${provider.key}`}>
+            <option value="">— choose a model —</option>
+            {models.map((m) => (<option key={m} value={m}>{m}</option>))}
+          </select>
+        ) : (
+          <input
+            className="input-paper"
+            style={{ width: 210, fontSize: '.8rem' }}
+            placeholder={provider.model ? `model: ${provider.model}` : 'model (or load the list →)'}
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+            data-testid={`model-input-${provider.key}`}
+          />
+        )}
+        <button className="chip-paper" disabled={busy} onClick={() => void loadModels()} data-testid={`model-load-${provider.key}`} title="Fetch the provider's live model list">
+          {busy ? '…' : 'Load models'}
+        </button>
+        <button className="chip-paper" disabled={busy || !choice.trim()} onClick={() => void save()} data-testid={`model-save-${provider.key}`}>
+          Save
+        </button>
+      </div>
+      {ok && <span className="mono" style={{ fontSize: '.72rem', color: 'var(--green-up)' }}>{ok}</span>}
+      {err && <span className="mono" style={{ fontSize: '.72rem', color: 'var(--brick)' }}>{err}</span>}
+    </div>
+  );
+}
 
 function AiTab(): ReactNode {
   const [providers, setProviders] = useState<AiProvider[] | null>(null);
@@ -214,24 +346,36 @@ function AiTab(): ReactNode {
   return (
     <div className="stack">
       {err && <div className="err-note" data-testid="ai-error">{err}</div>}
-      <div className="warn-note">Exactly <b>one</b> AI provider may be alive. Activating one atomically deactivates the incumbent. A health probe runs at activation — unreachable providers stay un-enableable. <b>The AI never runs on a schedule — only when a human presses Run.</b></div>
+      <div className="warn-note">Exactly <b>one</b> AI provider may be active at a time; activating one switches the previous one off. Activation checks the provider is reachable with your key first. <b>The AI never runs on a schedule — only when you press Run.</b></div>
       <div className="cards-grid">
         {providers.map((p) => (
           <div className="card" key={p.key} data-testid={`ai-${p.key}`}>
             <div className="spread">
               <h3 className="serif" style={{ fontSize: '1.05rem' }}>{p.name}</h3>
-              {p.alive && <span className="badge ok">ALIVE</span>}
+              {p.alive && <span className="badge ok">ACTIVE</span>}
             </div>
             <p className="mono muted" style={{ fontSize: '.74rem', margin: '8px 0' }}>
-              key: {p.keyConfigured ? '✓' : '✗'} · vision: {p.supports_vision ? 'yes' : 'no'}
+              key: {p.keyConfigured ? `✓ set${p.keyHint ? ` (${p.keyHint})` : ''}` : p.requiresKey ? '✗ required' : 'not needed'}
+              {' · '}vision: {p.supports_vision ? 'yes' : 'no'}
+              {p.model ? <> · model: <b>{p.model}</b></> : ''}
             </p>
             {!p.alive && (
-              <button className="chip-paper" onClick={() => void activate(p.key)} data-testid={`ai-activate-${p.key}`}>Activate</button>
+              <button
+                className="chip-paper"
+                onClick={() => void activate(p.key)}
+                disabled={p.requiresKey && !p.keyConfigured}
+                title={p.requiresKey && !p.keyConfigured ? 'Add the API key below first' : undefined}
+                data-testid={`ai-activate-${p.key}`}
+              >
+                {p.requiresKey && !p.keyConfigured ? 'Add API key to activate' : 'Activate'}
+              </button>
             )}
+            <KeyEntry fields={p.keyFields ?? []} hint={p.keyHint} onSaved={load} />
+            <ModelPicker provider={p} onSaved={load} />
           </div>
         ))}
       </div>
-      <button className="chip-paper" onClick={() => void api.post('/api/admin/ai-providers/deactivate').then(load)}>Deactivate all (disable the AI layer)</button>
+      <button className="chip-paper" onClick={() => void api.post('/api/admin/ai-providers/deactivate').then(load)}>Switch AI off (statistical runs only)</button>
     </div>
   );
 }
@@ -261,7 +405,7 @@ function WeightsTab(): ReactNode {
   };
   return (
     <div className="card" style={{ maxWidth: 560 }}>
-      <p className="kicker">stat_score weights (versioned — every run records the version it used)</p>
+      <p className="kicker">Ranking weights (versioned — every update records the version it used)</p>
       <div className="stack">
         {Object.keys(labels).map((k) => (
           <label className="spread" key={k}>

@@ -116,4 +116,13 @@ export class OllamaAdapter implements AIProviderAdapter {
       return { ok: false, detail: String(err).slice(0, 200) };
     }
   }
+
+  async listModels(): Promise<string[]> {
+    this.assertUrl();
+    const fetchFn = this.opts.fetchFn ?? fetch;
+    const res = await fetchFn(`${this.opts.url}/api/tags`, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { models?: { name: string }[] };
+    return (json.models ?? []).map((m) => m.name).sort();
+  }
 }

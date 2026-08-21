@@ -37,12 +37,12 @@ interface Progress {
 }
 
 const STAGE_LABELS: Record<string, string> = {
-  news_pull: '1 · News & injuries pull',
-  ingest: '2 · FPL anchor ingest',
-  stats: '3 · Statistical engine (L0–L12)',
+  news_pull: '1 · Pulling news & injuries',
+  ingest: '2 · Refreshing FPL data',
+  stats: '3 · Statistical engine',
   match: '4 · Match engine',
-  ai_pass: '5 · AI analysis pass',
-  carry_forward: '6 · Carrying stale verdicts',
+  ai_pass: '5 · AI analysis',
+  carry_forward: '6 · Carrying forward previous verdicts',
   rerank: '7 · Re-ranking',
   complete: 'Complete',
   failed: 'Failed',
@@ -57,14 +57,22 @@ export function RunScreen(): ReactNode {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState('');
   const [skipAi, setSkipAi] = useState(false);
+  const [newsInfo, setNewsInfo] = useState<{ providerEnabled: boolean; recentCount: number }>({ providerEnabled: true, recentCount: 0 });
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     void api
-      .get<{ candidates: Candidate[]; savedExclusions: string[]; aiProvider: { key: string } | null }>('/api/runs/prepare')
+      .get<{
+        candidates: Candidate[];
+        savedExclusions: string[];
+        aiProvider: { key: string } | null;
+        newsProviderEnabled?: boolean;
+        recentNewsCount?: number;
+      }>('/api/runs/prepare')
       .then((r) => {
         setCandidates(r.candidates);
         setAiProvider(r.aiProvider);
+        setNewsInfo({ providerEnabled: r.newsProviderEnabled ?? false, recentCount: r.recentNewsCount ?? 0 });
         const pre = new Set<string>([...r.savedExclusions, ...r.candidates.filter((c) => c.preChecked).map((c) => c.uid)]);
         setExcluded(pre);
       });
@@ -122,6 +130,15 @@ export function RunScreen(): ReactNode {
     });
   };
 
+  // bulk selection: clear everything, or skip the bottom N% by ranking
+  const selectNone = (): void => setExcluded(new Set());
+  const selectBottomPct = (pctBottom: number): void => {
+    if (!candidates) return;
+    const ranked = [...candidates].sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity));
+    const keep = Math.floor(ranked.length * (1 - pctBottom / 100));
+    setExcluded(new Set(ranked.slice(keep).map((c) => c.uid)));
+  };
+
   if (!candidates) return <Loading />;
   const running = progress != null && !progress.done;
 
@@ -137,12 +154,21 @@ export function RunScreen(): ReactNode {
           <div className="stack">
             <div className="stat-panel">
               <h4>Pre-flight</h4>
-              <div className="stat-row"><span>AI provider (alive)</span><b data-testid="alive-provider">{aiProvider?.key ?? 'none'}</b></div>
+              <div className="stat-row"><span>AI provider</span><b data-testid="alive-provider">{aiProvider?.key ?? 'none'}</b></div>
               <div className="stat-row"><span>Players eligible</span><b>{estimate?.players ?? '—'}</b></div>
               <div className="stat-row"><span>Estimated tokens</span><b>{estimate ? `~${estimate.tokens.toLocaleString()}` : '—'}</b></div>
               <div className="stat-row"><span>Estimated credits</span><b data-testid="estimate-credits">{estimate ? `≈ ${estimate.credits}` : '—'}</b></div>
               <div className="stat-row"><span>Your balance</span><b>{user?.role === 'admin' ? '∞ (admin)' : user?.tokenBalance.toLocaleString()}</b></div>
               {estimate?.note && <p style={{ marginTop: 10, fontSize: '.82rem', color: '#B9C2D6' }}>{estimate.note}</p>}
+              {estimate?.players === 0 && !skipAi && (
+                <p style={{ marginTop: 10, fontSize: '.82rem', color: '#B9C2D6' }} data-testid="eligible-reason">
+                  {!newsInfo.providerEnabled
+                    ? 'Nobody to analyse: no news provider is enabled, so the AI has nothing new to read. Enable NewsData.io in Admin → Data providers, or untick some skipped players.'
+                    : newsInfo.recentCount === 0
+                      ? 'Nobody to analyse yet: no news has arrived in the last 7 days. The news pull at the start of this run may bring some in.'
+                      : 'Nobody to analyse: every player is either on the skip list or has no new news since their last analysis.'}
+                </p>
+              )}
               <div style={{ marginTop: 18 }} className="row">
                 <button className="btn-glass-dark" onClick={() => void launch()} disabled={running} data-testid="run-launch">
                   {running ? 'Running…' : '▶ Launch run'}
@@ -192,11 +218,19 @@ export function RunScreen(): ReactNode {
           </div>
 
           <div className="card" style={{ maxHeight: 560, overflowY: 'auto' }}>
-            <p className="kicker">AI exclusion list ({excluded.size} skipped — bottom 25% pre-checked)</p>
-            <p className="muted" style={{ fontSize: '.82rem', marginBottom: 12 }}>
-              Checked players keep their last AI verdict (flagged stale) and cost no tokens. Players with zero new news are skipped automatically.
+            <p className="kicker">AI skip list ({excluded.size} skipped)</p>
+            <p className="muted" style={{ fontSize: '.82rem', marginBottom: 10 }}>
+              Checked players keep their previous AI verdict and cost nothing. Players without fresh news are skipped automatically either way.
             </p>
-            {candidates.length === 0 && <p className="muted">No matrix yet — the first run analyses nobody (no news mapped); rankings appear after it.</p>}
+            <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              <button className="chip-paper" onClick={selectNone} data-testid="excl-none">Unselect all</button>
+              {[20, 30, 40, 50, 60].map((p) => (
+                <button key={p} className="chip-paper" onClick={() => selectBottomPct(p)} data-testid={`excl-bottom-${p}`}>
+                  Bottom {p}%
+                </button>
+              ))}
+            </div>
+            {candidates.length === 0 && <p className="muted">Rankings appear after your first update — run one and this list fills in.</p>}
             <div className="stack" style={{ gap: 4 }}>
               {candidates.map((c) => (
                 <label key={c.uid} className="spread" style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)', cursor: 'pointer', fontSize: '.88rem' }}>

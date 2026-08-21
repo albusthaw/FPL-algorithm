@@ -68,7 +68,8 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         key: 'deepseek',
         baseUrl: 'https://api.deepseek.com/v1',
         apiKey: config.keys.deepseek,
-        model: model ?? 'deepseek-chat',
+        model: model ?? 'deepseek-v4-flash', // verified live 2026-08: deepseek-chat is gone
+
         supportsVision: false,
         supportsNativeJsonSchema: false,
         jsonMode: 'json_object',

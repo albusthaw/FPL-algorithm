@@ -108,6 +108,10 @@ export class MockProvider implements AIProviderAdapter {
     return Math.ceil((system.length + runContext.length + batchBlock.length) / 4);
   }
 
+  async listModels(): Promise<string[]> {
+    return ['mock-analyst-1', 'mock-vision-1'];
+  }
+
   async healthCheck(): Promise<{ ok: boolean; detail: string }> {
     return { ok: true, detail: 'mock provider always healthy' };
   }

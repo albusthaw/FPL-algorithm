@@ -1,14 +1,78 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, n, fmtPrice, type MatrixPlayer } from '../api';
+import { api, n, pct, fmtPrice, type MatrixPlayer } from '../api';
 import { RankChange, Loading } from '../components/Layout';
+
+type SortKey =
+  | 'rank_overall'
+  | 'web_name'
+  | 'position'
+  | 'club'
+  | 'price'
+  | 'overall_score'
+  | 'ai_adjustment'
+  | 'xpts_next1'
+  | 'xpts_next3'
+  | 'xpts_next6'
+  | 'p_start_xi'
+  | 'selected_by_pct'
+  | 'injury_status';
+
+const NUMERIC_KEYS = new Set<SortKey>([
+  'rank_overall', 'price', 'overall_score', 'ai_adjustment',
+  'xpts_next1', 'xpts_next3', 'xpts_next6', 'p_start_xi', 'selected_by_pct',
+]);
 
 export function PlayersPage(): ReactNode {
   const [players, setPlayers] = useState<MatrixPlayer[] | null>(null);
   const [movement, setMovement] = useState<Record<string, number>>({});
   const [position, setPosition] = useState('');
   const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>('rank_overall');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const navigate = useNavigate();
+
+  const toggleSort = (key: SortKey): void => {
+    if (key === sortKey) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      // numbers usually want best-first on first click; names A→Z
+      setSortDir(NUMERIC_KEYS.has(key) && key !== 'rank_overall' ? 'desc' : 'asc');
+    }
+  };
+
+  const sorted = useMemo(() => {
+    if (!players) return null;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...players].sort((a, b) => {
+      const av = a[sortKey as keyof MatrixPlayer];
+      const bv = b[sortKey as keyof MatrixPlayer];
+      if (NUMERIC_KEYS.has(sortKey)) {
+        const an = Number(av);
+        const bn = Number(bv);
+        const aa = Number.isFinite(an) ? an : sortDir === 'asc' ? Infinity : -Infinity;
+        const bb = Number.isFinite(bn) ? bn : sortDir === 'asc' ? Infinity : -Infinity;
+        return (aa - bb) * dir;
+      }
+      return String(av ?? '').localeCompare(String(bv ?? '')) * dir;
+    });
+  }, [players, sortKey, sortDir]);
+
+  const Th = ({ k, children }: { k: SortKey; children: ReactNode }): ReactNode => (
+    <th
+      className="clickable"
+      style={{ cursor: 'pointer', whiteSpace: 'nowrap', userSelect: 'none' }}
+      onClick={() => toggleSort(k)}
+      data-testid={`sort-${k}`}
+      title="Click to sort"
+    >
+      {children}
+      <span style={{ opacity: sortKey === k ? 1 : 0.25, marginLeft: 3 }}>
+        {sortKey === k ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}
+      </span>
+    </th>
+  );
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -25,7 +89,7 @@ export function PlayersPage(): ReactNode {
     return () => clearTimeout(t);
   }, [position, search]);
 
-  if (!players) return <Loading />;
+  if (!players || !sorted) return <Loading />;
 
   return (
     <div className="container">
@@ -55,12 +119,15 @@ export function PlayersPage(): ReactNode {
           <table data-testid="players-table">
             <thead>
               <tr>
-                <th>Rank</th><th>Player</th><th>Pos</th><th>Club</th><th>Price</th><th>Score</th><th>AI</th>
-                <th>xP1</th><th>xP3</th><th>xP6</th><th>Start%</th><th>Own%</th><th>Status</th><th>Δ</th>
+                <Th k="rank_overall">Rank</Th><Th k="web_name">Player</Th><Th k="position">Pos</Th>
+                <Th k="club">Club</Th><Th k="price">Price</Th><Th k="overall_score">Score</Th>
+                <Th k="ai_adjustment">AI</Th><Th k="xpts_next1">xP1</Th><Th k="xpts_next3">xP3</Th>
+                <Th k="xpts_next6">xP6</Th><Th k="p_start_xi">Start%</Th><Th k="selected_by_pct">Own%</Th>
+                <Th k="injury_status">Status</Th><th>Δ</th>
               </tr>
             </thead>
             <tbody>
-              {players.map((p) => (
+              {sorted.map((p) => (
                 <tr key={p.uid} className="clickable" onClick={() => navigate(`/players/${p.uid}`)}>
                   <td className="mono muted">{p.rank_overall ?? '—'}</td>
                   <td className="team-name">{p.web_name}</td>
@@ -70,17 +137,20 @@ export function PlayersPage(): ReactNode {
                   <td className="mono" style={{ fontWeight: 700 }}>{n(p.overall_score)}</td>
                   <td className="mono">
                     {Number(p.ai_adjustment ?? 0) !== 0 ? (
-                      <span className={Number(p.ai_adjustment) > 0 ? 'rc-up' : 'rc-down'}>
-                        {Number(p.ai_adjustment) > 0 ? '+' : ''}{n(p.ai_adjustment, 0)}{p.ai_stale ? '·st' : ''}
+                      <span
+                        className={Number(p.ai_adjustment) > 0 ? 'rc-up' : 'rc-down'}
+                        title={p.ai_stale ? 'carried forward from an earlier analysis' : 'from the latest analysis'}
+                      >
+                        {Number(p.ai_adjustment) > 0 ? '+' : ''}{n(p.ai_adjustment, 0)}{p.ai_stale ? '*' : ''}
                       </span>
                     ) : '—'}
                   </td>
                   <td className="mono">{n(p.xpts_next1)}</td>
                   <td className="mono">{n(p.xpts_next3)}</td>
                   <td className="mono">{n(p.xpts_next6)}</td>
-                  <td className="mono">{p.p_start_xi != null ? `${Math.round(Number(p.p_start_xi) * 100)}%` : '—'}</td>
+                  <td className="mono">{pct(p.p_start_xi)}</td>
                   <td className="mono">{n(p.selected_by_pct)}</td>
-                  <td>{p.injury_status && p.injury_status !== 'fit' ? <span className="badge bad">{p.injury_status}</span> : <span className="badge ok">fit</span>}</td>
+                  <td>{p.injury_status && p.injury_status !== 'fit' ? <span className="badge bad">{p.injury_status.replace(/_/g, ' ')}</span> : <span className="badge ok">fit</span>}</td>
                   <td><RankChange delta={movement[p.uid]} /></td>
                 </tr>
               ))}
@@ -124,16 +194,16 @@ export function PlayerDetailPage(): ReactNode {
 
         <div className="grid-2" style={{ alignItems: 'start' }}>
           <div className="stat-panel">
-            <h4>Current matrix</h4>
+            <h4>Current assessment</h4>
             {matrix ? (
               <>
                 <div className="stat-row"><span>Overall score</span><b>{n(matrix.overall_score as string)}</b></div>
                 <div className="stat-row"><span>Statistical score</span><b>{n(matrix.stat_score as string)}</b></div>
-                <div className="stat-row"><span>AI adjustment</span><b>{Number(matrix.ai_adjustment) > 0 ? '+' : ''}{n(matrix.ai_adjustment as string, 0)}{matrix.ai_stale ? ' (stale)' : ''}</b></div>
-                <div className="stat-row"><span>xPts next 1 / 3 / 6</span><b>{n(matrix.xpts_next1 as string)} / {n(matrix.xpts_next3 as string)} / {n(matrix.xpts_next6 as string)}</b></div>
-                <div className="stat-row"><span>Start probability</span><b>{Math.round(Number(matrix.p_start_xi) * 100)}%</b></div>
-                <div className="stat-row"><span>xG / xA per 90 (shrunk)</span><b>{n(matrix.xg_per90 as string, 2)} / {n(matrix.xa_per90 as string, 2)}</b></div>
-                <div className="stat-row"><span>Clean-sheet prob (next)</span><b>{Math.round(Number(matrix.xcs) * 100)}%</b></div>
+                <div className="stat-row"><span>AI adjustment</span><b>{Number(matrix.ai_adjustment) > 0 ? '+' : ''}{n(matrix.ai_adjustment as string, 0)}{matrix.ai_stale ? ' (carried forward)' : ''}</b></div>
+                <div className="stat-row"><span>Expected points next 1 / 3 / 6</span><b>{n(matrix.xpts_next1 as string)} / {n(matrix.xpts_next3 as string)} / {n(matrix.xpts_next6 as string)}</b></div>
+                <div className="stat-row"><span>Start probability</span><b>{pct(matrix.p_start_xi as string)}</b></div>
+                <div className="stat-row"><span>xG / xA per 90 (adjusted)</span><b>{n(matrix.xg_per90 as string, 2)} / {n(matrix.xa_per90 as string, 2)}</b></div>
+                <div className="stat-row"><span>Clean-sheet chance (next match)</span><b>{pct(matrix.xcs as string)}</b></div>
                 <div className="stat-row"><span>Rank overall / position</span><b>#{matrix.rank_overall} / #{matrix.rank_position}</b></div>
                 {(matrix.ai_rationale as string) && <p style={{ marginTop: 12, fontSize: '.85rem', color: '#B9C2D6', fontStyle: 'italic' }}>“{matrix.ai_rationale as string}”</p>}
               </>
@@ -144,19 +214,20 @@ export function PlayerDetailPage(): ReactNode {
 
           <div className="stack">
             <div className="card">
-              <p className="kicker">Score history (last {history.length} runs)</p>
+              <p className="kicker">Score history (last {history.length} {history.length === 1 ? 'update' : 'updates'})</p>
               <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 80 }} data-testid="sparkline">
+                {history.length === 0 && <p className="muted" style={{ fontSize: '.85rem' }}>No score history yet — it builds up with each update you run.</p>}
                 {history.slice().reverse().map((h) => (
                   <div
                     key={h.run_id}
-                    title={`run #${h.run_id}: ${n(h.overall_score)}`}
+                    title={`${new Date(h.computed_at).toLocaleDateString()}: ${n(h.overall_score)}`}
                     style={{ flex: 1, minWidth: 3, height: `${(Number(h.overall_score) / sparkMax) * 100}%`, background: 'var(--brass)', borderRadius: 2 }}
                   />
                 ))}
               </div>
             </div>
             <div className="card">
-              <p className="kicker">Upcoming fixtures (this run)</p>
+              <p className="kicker">Upcoming fixtures</p>
               <div className="table-wrap">
                 <table style={{ minWidth: 480 }}>
                   <thead><tr><th>GW</th><th>Fixture</th><th>xPts</th><th>Start</th><th>xG</th><th>xA</th><th>CS</th></tr></thead>
@@ -166,10 +237,10 @@ export function PlayerDetailPage(): ReactNode {
                         <td className="mono">{u.event}</td>
                         <td>{u.home} v {u.away}</td>
                         <td className="mono" style={{ fontWeight: 700 }}>{n(u.xpts)}</td>
-                        <td className="mono">{Math.round(Number(u.p_start) * 100)}%</td>
+                        <td className="mono">{pct(u.p_start)}</td>
                         <td className="mono">{n(u.e_goals, 2)}</td>
                         <td className="mono">{n(u.e_assists, 2)}</td>
-                        <td className="mono">{Math.round(Number(u.p_cs) * 100)}%</td>
+                        <td className="mono">{pct(u.p_cs)}</td>
                       </tr>
                     ))}
                   </tbody>

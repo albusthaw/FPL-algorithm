@@ -394,3 +394,54 @@ describe('optimiser', () => {
     }
   });
 });
+
+describe('cold start (fresh install, no match history)', () => {
+  const minutesCfg = DEFAULT_CONFIG.minutes_model as unknown as MinutesConfig;
+
+  it('L1 fit with zero matches returns finite prior-based params, never NaN', () => {
+    const params = fitTeamStrength([], { priorTeams: { A: { attack: -0.25, defence: -0.15 }, B: { attack: 0, defence: 0 } } });
+    expect(Number.isFinite(params.mu)).toBe(true);
+    expect(Number.isFinite(params.homeAdv)).toBe(true);
+    for (const t of params.teams) {
+      expect(Number.isFinite(params.attack[t]!)).toBe(true);
+      expect(Number.isFinite(params.defence[t]!)).toBe(true);
+    }
+    const { lambdaHome, lambdaAway } = fixtureLambdas(params, 'A', 'B');
+    expect(Number.isFinite(lambdaHome)).toBe(true);
+    expect(Number.isFinite(lambdaAway)).toBe(true);
+    const pred = predictFromLambdas(lambdaHome, lambdaAway, params.rho);
+    expect(Number.isFinite(pred.pCsHome)).toBe(true);
+    expect(pred.pCsHome).toBeGreaterThan(0);
+    expect(pred.pCsHome).toBeLessThan(1);
+  });
+
+  it('heavily-owned player without history gets an ownership-based start prior, not 6%', () => {
+    const base = {
+      status: 'a', chanceNext: null, activeInjury: null, confirmedLineup: null,
+      position: 'FWD', startShare5: 0, minutesEwma: 0, startedLast: false,
+      daysSinceLastMatch: null, congested: false, newSigning: false,
+      returnedFromInjury: false, fixturesAhead: 1,
+    };
+    const haaland = predictMinutes({ ...base, selectedByPct: 69.4 }, minutesCfg);
+    expect(haaland.pStart).toBeGreaterThan(0.8);
+    const benchGk = predictMinutes({ ...base, position: 'GK', selectedByPct: 0.3 }, minutesCfg);
+    expect(benchGk.pStart).toBeLessThan(0.35);
+    // ordering: more owned ⇒ likelier to start
+    const mid = predictMinutes({ ...base, selectedByPct: 15 }, minutesCfg);
+    expect(haaland.pStart).toBeGreaterThan(mid.pStart);
+    expect(mid.pStart).toBeGreaterThan(benchGk.pStart);
+  });
+
+  it('players WITH history are unaffected by the cold-start prior', () => {
+    const nailedOn = predictMinutes(
+      {
+        status: 'a', chanceNext: null, activeInjury: null, confirmedLineup: null,
+        position: 'DEF', selectedByPct: 2, startShare5: 0.95, minutesEwma: 88,
+        startedLast: true, daysSinceLastMatch: 4, congested: false,
+        newSigning: false, returnedFromInjury: false, fixturesAhead: 1,
+      },
+      minutesCfg,
+    );
+    expect(nailedOn.pStart).toBeGreaterThan(0.9); // start-share table wins, ownership irrelevant
+  });
+});

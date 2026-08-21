@@ -187,4 +187,15 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       return { ok: false, detail: String(err).slice(0, 200) };
     }
   }
+
+  async listModels(): Promise<string[]> {
+    const fetchFn = this.opts.fetchFn ?? fetch;
+    const res = await fetchFn(`${this.opts.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${this.opts.apiKey}`, ...this.opts.extraHeaders },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { data?: { id: string }[] };
+    return (json.data ?? []).map((m) => m.id).sort();
+  }
 }

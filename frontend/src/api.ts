@@ -85,5 +85,15 @@ export interface MatrixPlayer {
 }
 
 export const fmtPrice = (tenths: number): string => `£${(tenths / 10).toFixed(1)}m`;
-export const n = (v: string | number | null | undefined, dp = 1): string =>
-  v == null ? '—' : Number(v).toFixed(dp);
+export const n = (v: string | number | null | undefined, dp = 1): string => {
+  if (v == null) return '—';
+  const num = Number(v);
+  return Number.isFinite(num) ? num.toFixed(dp) : '—';
+};
+
+/** Percentage display that never shows NaN — non-finite renders as a dash. */
+export const pct = (v: string | number | null | undefined): string => {
+  if (v == null) return '—';
+  const num = Number(v);
+  return Number.isFinite(num) ? `${Math.round(num * 100)}%` : '—';
+};

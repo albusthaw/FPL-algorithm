@@ -60,4 +60,6 @@ export interface AIProviderAdapter {
   parseTeamImage(imageBase64: string, mimeType: string, inv: AIInvocation): Promise<ProviderResult>;
   estimateTokens(system: string, runContext: string, batchBlock: string): Promise<number>;
   healthCheck(): Promise<{ ok: boolean; detail: string }>;
+  /** Live model list from the provider — powers the admin panel's model picker. */
+  listModels?(): Promise<string[]>;
 }

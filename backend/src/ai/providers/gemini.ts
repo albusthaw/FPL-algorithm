@@ -137,4 +137,18 @@ export class GeminiAdapter implements AIProviderAdapter {
       return { ok: false, detail: String(err).slice(0, 200) };
     }
   }
+
+  async listModels(): Promise<string[]> {
+    const fetchFn = this.opts.fetchFn ?? fetch;
+    const res = await fetchFn(`${API}/models?pageSize=100`, {
+      headers: { 'x-goog-api-key': this.opts.apiKey },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { models?: { name: string; supportedGenerationMethods?: string[] }[] };
+    return (json.models ?? [])
+      .filter((m) => (m.supportedGenerationMethods ?? []).includes('generateContent'))
+      .map((m) => m.name.replace(/^models\//, ''))
+      .sort();
+  }
 }

@@ -61,6 +61,13 @@ export function fitTeamStrength(
   let mu = Math.log(1.35);
   let homeAdv = 0.25;
 
+  // cold start (no finished matches yet — e.g. a fresh install before GW1):
+  // the priors ARE the fit. The gradient loop below would divide by zero
+  // match counts and poison every parameter with NaN.
+  if (matches.length === 0) {
+    return { attack, defence, mu, homeAdv, rho: -0.05, xi, teams };
+  }
+
   const weights = matches.map((m) => Math.exp(-xi * m.daysAgo));
   const iterations = opts.iterations ?? 400;
   const lr = opts.learningRate ?? 0.06;
@@ -101,7 +108,7 @@ export function fitTeamStrength(
       gradHome += dH;
     });
 
-    const scale = lr / Math.max(1, totalW / matches.length);
+    const scale = lr / Math.max(1, matches.length > 0 ? totalW / matches.length : 1);
     for (const t of teams) {
       const n = effCount[t] ?? 0;
       // ridge toward prior for thin data (promoted teams keep their prior)

@@ -177,8 +177,8 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       blendAway: blend.lambdaAway,
       pred,
       oddsUsed: blend.wMkt > 0,
-      attRatioHome: blend.lambdaHome / (baselines.get(f.homeTeamUid) ?? blend.lambdaHome),
-      attRatioAway: blend.lambdaAway / (baselines.get(f.awayTeamUid) ?? blend.lambdaAway),
+      attRatioHome: fin(blend.lambdaHome / (baselines.get(f.homeTeamUid) ?? blend.lambdaHome), 1),
+      attRatioAway: fin(blend.lambdaAway / (baselines.get(f.awayTeamUid) ?? blend.lambdaAway), 1),
     });
   }
 
@@ -343,7 +343,12 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       (a, b) => (a.kickoff?.getTime() ?? Infinity) - (b.kickoff?.getTime() ?? Infinity),
     );
     const injury = injuryByPlayer.get(p.uid) ?? null;
-    const newSigning = currentSeasonStarted ? features.matchesUsed < 2 : rows.length === 0;
+    // "new signing" only means anything when we HAVE history for the league:
+    // on a fresh install with no imported history, nobody is a new signing —
+    // otherwise every player gets the ×0.70 penalty and loses the
+    // undroppable floor (the everyone-at-6% bug)
+    const historyExists = rowsByPlayer.size > 50;
+    const newSigning = historyExists && (currentSeasonStarted ? features.matchesUsed < 2 : rows.length === 0);
     // v1: closed-injury lookback lands with the reconciliation pass; the FPL
     // chance flags already carry most of the return-ramp signal
     const returnedFromInjury = false;
@@ -402,6 +407,11 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
         minutesCfg,
       );
 
+      // a non-finite probability would silently poison everything downstream
+      for (const key of ['pStart', 'p60', 'pAny', 'eMin'] as const) {
+        if (!Number.isFinite(minutes[key])) minutes[key] = 0;
+      }
+
       const breakdown = composeXpts(
         {
           position: p.position,
@@ -424,6 +434,12 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
         rules,
         bonusProfiles,
       );
+
+      // NaN must never reach the database — sanitize every numeric component
+      for (const key of Object.keys(breakdown) as (keyof XptsBreakdown)[]) {
+        const v = breakdown[key];
+        if (typeof v === 'number' && !Number.isFinite(v)) (breakdown as unknown as Record<string, unknown>)[key] = 0;
+      }
 
       xptsPerEvent.set(f.event, (xptsPerEvent.get(f.event) ?? 0) + breakdown.total);
       const fdrRow = fdr.get(f.fixtureUid)!;
@@ -639,6 +655,11 @@ function injuryStatusOf(status: string, chanceNext: number | null): string {
 
 function r3(x: number): number {
   return Number(x.toFixed(3));
+}
+
+/** Finite or fallback — Postgres numeric happily stores NaN; we never do. */
+function fin(x: number, fallback = 0): number {
+  return Number.isFinite(x) ? x : fallback;
 }
 
 /** Re-rank a run's matrix after AI adjustments (dense ranks, overall + per position). */
