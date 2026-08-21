@@ -4,6 +4,11 @@ Every build session (human or AI) follows this file. It is the contract that
 keeps upgrades safe, the theme consistent, and the architecture invariants
 intact. Read it before writing a line of code.
 
+> Historical planning documents referenced below (fpl-project.md,
+> fpl-engines-plan.md, fpl-api-integration-plan.md, fpl-ai-engine-plan.md,
+> howupgradeshouldwork-1.md, statengineexpansion.md) now live in
+> `Old Markdown/`. The active engine-upgrade plan is `enginesupgrade.md`.
+
 ---
 
 ## RULE #1 (HARD-CODED, READ FIRST) — Write code to meet `upgrade.sh` demands, and how to repack the release zip
