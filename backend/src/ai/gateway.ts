@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import type { Knex } from 'knex';
 import { config } from '../core/config.js';
 import { getConfig, getConfigVersion } from '../core/model-config.js';
+import { DEFAULT_CAPABILITIES, type CapabilityConfig, type ModelCapabilities } from '../core/ai-capabilities.js';
 import { applyTokens, InsufficientTokensError } from '../tokens/ledger.js';
 import type { AIInvocation, AIProviderAdapter, AIVerdict, PlayerNewsBundle, ProviderResult } from './types.js';
 import { SYSTEM_BLOCK, buildRunContext, buildBatchBlock, buildMatrixLine } from './prompt.js';
@@ -44,14 +45,27 @@ interface AiSettings {
   estimate_margin_pct: number;
 }
 
-export function buildAdapter(key: string, providerConfig: Record<string, unknown> = {}): AIProviderAdapter {
+export interface BuildAdapterOpts {
+  capabilityConfig?: CapabilityConfig;
+  /** persisted param facts learned from live 400s (ai_providers.config.capabilities) */
+  learned?: Partial<ModelCapabilities> | null;
+  onLearned?: (patch: Partial<ModelCapabilities>) => void | Promise<void>;
+}
+
+export function buildAdapter(
+  key: string,
+  providerConfig: Record<string, unknown> = {},
+  opts: BuildAdapterOpts = {},
+): AIProviderAdapter {
   const model = typeof providerConfig.model === 'string' ? providerConfig.model : undefined;
   const visionModel = typeof providerConfig.vision_model === 'string' ? providerConfig.vision_model : undefined;
+  const capabilityConfig = opts.capabilityConfig ?? DEFAULT_CAPABILITIES;
+  const common = { capabilityConfig, learned: opts.learned ?? null, onLearned: opts.onLearned };
   switch (key) {
     case 'anthropic':
-      return new AnthropicAdapter({ apiKey: config.keys.anthropic, model, visionModel });
+      return new AnthropicAdapter({ apiKey: config.keys.anthropic, model, visionModel, capabilityConfig });
     case 'gemini':
-      return new GeminiAdapter({ apiKey: config.keys.gemini, model });
+      return new GeminiAdapter({ apiKey: config.keys.gemini, model, capabilityConfig });
     case 'openai':
       return new OpenAICompatibleAdapter({
         key: 'openai',
@@ -59,9 +73,7 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         apiKey: config.keys.openai,
         model: model ?? 'gpt-4o-mini',
         visionModel,
-        supportsVision: true,
-        supportsNativeJsonSchema: true,
-        jsonMode: 'json_schema',
+        ...common,
       });
     case 'deepseek':
       return new OpenAICompatibleAdapter({
@@ -69,10 +81,8 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         baseUrl: 'https://api.deepseek.com/v1',
         apiKey: config.keys.deepseek,
         model: model ?? 'deepseek-v4-flash', // verified live 2026-08: deepseek-chat is gone
-
-        supportsVision: false,
-        supportsNativeJsonSchema: false,
-        jsonMode: 'json_object',
+        visionModel, // e.g. deepseek-v4-flash-vision-exp — per-MODEL vision (P4)
+        ...common,
         timeoutMs: 120_000, // dynamic rate limiting holds requests open
         maxTokens: 8192, // v4-flash spends completion tokens reasoning before the JSON
       });
@@ -82,9 +92,8 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         baseUrl: 'https://api.moonshot.ai/v1',
         apiKey: config.keys.kimi,
         model: model ?? 'kimi-k2-0711-preview',
-        supportsVision: false,
-        supportsNativeJsonSchema: false,
-        jsonMode: 'json_object',
+        visionModel,
+        ...common,
       });
     case 'ollama':
       return new OllamaAdapter({
@@ -99,9 +108,13 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         baseUrl: config.keys.modalUrl.replace(/\/$/, '') + '/v1',
         apiKey: 'modal',
         model: model ?? 'default',
-        supportsVision: Boolean(providerConfig.supports_vision),
-        supportsNativeJsonSchema: false,
-        jsonMode: 'json_object',
+        visionModel,
+        ...common,
+        // legacy per-provider flag honoured as a learned override
+        learned: {
+          ...(opts.learned ?? {}),
+          ...(providerConfig.supports_vision ? { vision: true } : {}),
+        },
         extraHeaders: {
           ...(config.keys.modalKey ? { 'Modal-Key': config.keys.modalKey } : {}),
           ...(config.keys.modalSecret ? { 'Modal-Secret': config.keys.modalSecret } : {}),
@@ -119,10 +132,28 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
   }
 }
 
+/** Load the ⚙ capability registry (falls back to the compiled default). */
+export async function loadCapabilityConfig(db: Knex): Promise<CapabilityConfig> {
+  return getConfig<CapabilityConfig>(db, 'ai_model_capabilities').catch(() => DEFAULT_CAPABILITIES);
+}
+
 export async function getAliveProvider(db: Knex): Promise<{ key: string; adapter: AIProviderAdapter; row: Record<string, unknown> }> {
   const row = await db('ai_providers').where('alive', true).first();
   if (!row) throw new NoAliveProviderError();
-  return { key: row.key, adapter: buildAdapter(row.key, row.config ?? {}), row };
+  const capabilityConfig = await loadCapabilityConfig(db);
+  const providerConfig = (row.config ?? {}) as Record<string, unknown>;
+  const learned = (providerConfig.capabilities ?? null) as Partial<ModelCapabilities> | null;
+  const adapter = buildAdapter(row.key, providerConfig, {
+    capabilityConfig,
+    learned,
+    // a live 400 teaches permanently — the AI-side entitlement learning
+    onLearned: async (patch) => {
+      const cfg = { ...providerConfig, capabilities: { ...(learned ?? {}), ...patch } };
+      await db('ai_providers').where({ key: row.key }).update({ config: JSON.stringify(cfg), updated_at: db.fn.now() });
+      log.warn({ provider: row.key, patch }, 'learned model capability from live 400');
+    },
+  });
+  return { key: row.key, adapter, row };
 }
 
 /** Max-1 gate: activating one provider atomically deactivates the incumbent. */
@@ -411,7 +442,21 @@ export async function estimateRun(
   return { tokens, credits, players: eligible.length, provider: key, marginPct: settings.estimate_margin_pct };
 }
 
-/** Vision pipeline entry (fpl-project.md §9.2) — same gate, same accounting. */
+/** X3 (v1.4.1): BudgetGuard BEFORE any vision/OCR provider call — the old
+ *  after-call debit burned real provider spend then threw on the debit. */
+async function assertVisionBudget(db: Knex, inv: AIInvocation): Promise<void> {
+  const user = await db('users').where('id', inv.triggeredByUserId).first('role', 'token_balance');
+  if (!user || user.role === 'admin') return;
+  const settings = await getConfig<AiSettings & { vision_estimate_credits?: number }>(db, 'ai');
+  const estimate = settings.vision_estimate_credits ?? 4;
+  if (Number(user.token_balance) < estimate) {
+    throw Object.assign(new Error(`You're out of credits for an image parse (needs ≈${estimate}). Contact your admin to top up.`), {
+      statusCode: 402,
+    });
+  }
+}
+
+/** Vision pipeline entry (archived plan §9.2) — same gate, same accounting. */
 export async function parseTeamImage(
   db: Knex,
   inv: AIInvocation,
@@ -427,6 +472,7 @@ export async function parseTeamImage(
       statusCode: 422,
     });
   }
+  await assertVisionBudget(db, inv);
   const started = Date.now();
   const result = await adapter.parseTeamImage(imageBase64, mimeType, inv);
   const credits = computeCredits(pricing, key, result.usage);
@@ -438,10 +484,53 @@ export async function parseTeamImage(
   if (credits > 0) {
     await applyTokens(db, { userId: inv.triggeredByUserId, delta: -credits, reason: 'vision', runId: inv.runId ?? null });
   }
+  if (result.finishReason === 'length') {
+    await db('ai_calls').where('id', aiCallId).update({ status: 'truncated' });
+    throw Object.assign(new Error('the vision reply was truncated — try a smaller or clearer screenshot'), { statusCode: 422 });
+  }
   const parsed = ParsedTeamSchema.safeParse(JSON.parse(extractJson(result.text)));
   if (!parsed.success) {
     await db('ai_calls').where('id', aiCallId).update({ status: 'failed_validation' });
     throw Object.assign(new Error('the AI could not produce a valid team parse — try a clearer screenshot'), { statusCode: 422 });
+  }
+  return { players: parsed.data, aiCallId, credits, provider: key };
+}
+
+/**
+ * P3 (v1.4.1): OCR-text reformat entry — the token-cheap path. Works on
+ * EVERY provider (no vision capability required); same human gate, same
+ * accounting, single repair via schema re-parse tolerance.
+ */
+export async function parseTeamOcrText(
+  db: Knex,
+  inv: AIInvocation,
+  ocrText: string,
+): Promise<{ players: unknown[]; aiCallId: number; credits: number; provider: string } | null> {
+  const { adapter, key } = await getAliveProvider(db);
+  if (!adapter.parseTeamText) return null; // provider cannot reformat text
+  const pricing = await getConfig<AiPricing>(db, 'ai_pricing');
+  const pricingVersion = await getConfigVersion(db, 'ai_pricing');
+  await assertVisionBudget(db, inv);
+  const started = Date.now();
+  const result = await adapter.parseTeamText(ocrText, inv);
+  const credits = computeCredits(pricing, key, result.usage);
+  const aiCallId = await recordCall(db, inv, key, 'vision', result, {
+    latencyMs: Date.now() - started,
+    pricingVersion,
+    credits,
+  });
+  if (credits > 0) {
+    await applyTokens(db, { userId: inv.triggeredByUserId, delta: -credits, reason: 'vision', runId: inv.runId ?? null });
+  }
+  let parsed: ReturnType<typeof ParsedTeamSchema.safeParse>;
+  try {
+    parsed = ParsedTeamSchema.safeParse(JSON.parse(extractJson(result.text)));
+  } catch {
+    parsed = ParsedTeamSchema.safeParse(null);
+  }
+  if (!parsed.success) {
+    await db('ai_calls').where('id', aiCallId).update({ status: 'failed_validation' });
+    return null; // caller decides: vision fallback or a clear error
   }
   return { players: parsed.data, aiCallId, credits, provider: key };
 }

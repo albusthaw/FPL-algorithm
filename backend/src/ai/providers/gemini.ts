@@ -3,7 +3,8 @@
  * JSON (repair retry stays ON), implicit caching, free countTokens.
  */
 import type { AIInvocation, AIProviderAdapter, ProviderResult, ProviderUsage } from '../types.js';
-import { VISION_PROMPT } from '../prompt.js';
+import { VISION_PROMPT, OCR_REFORMAT_PROMPT } from '../prompt.js';
+import { resolveCapabilities, type CapabilityConfig } from '../../core/ai-capabilities.js';
 
 const API = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -12,10 +13,16 @@ export class GeminiAdapter implements AIProviderAdapter {
   supportsVision = true;
   supportsNativeJsonSchema = false; // schema-guided, not strict → repair ON
 
-  constructor(private opts: { apiKey: string; model?: string; fetchFn?: typeof fetch }) {}
+  constructor(private opts: { apiKey: string; model?: string; capabilityConfig: CapabilityConfig; fetchFn?: typeof fetch }) {}
 
   private model(): string {
     return this.opts.model ?? 'gemini-2.5-flash';
+  }
+
+  /** P4: 2.5-era models spend thinking tokens from maxOutputTokens — the
+   *  registry raises the budget so replies don't arrive empty at MAX_TOKENS. */
+  private maxOutput(): number {
+    return resolveCapabilities(this.opts.capabilityConfig, 'gemini', this.model()).maxOutput ?? 4096;
   }
 
   private normaliseUsage(u: Record<string, unknown> | undefined): ProviderUsage {
@@ -32,7 +39,7 @@ export class GeminiAdapter implements AIProviderAdapter {
       contents,
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 4096,
+        maxOutputTokens: this.maxOutput(),
         ...(json
           ? {
               responseMimeType: 'application/json',
@@ -81,14 +88,26 @@ export class GeminiAdapter implements AIProviderAdapter {
   }
 
   async repair(previous: ProviderResult, errors: string, _inv: AIInvocation): Promise<ProviderResult> {
+    // user-first contents (P4): model-first sequences are rejected by v1beta
     return this.generate(
       [
-        { role: 'model', parts: [{ text: previous.text.slice(0, 8000) }] },
-        { role: 'user', parts: [{ text: `Your previous output failed validation: ${errors}. Return ONLY the corrected JSON array.` }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `Your previous JSON output failed validation: ${errors}.\n\nPrevious output:\n${previous.text.slice(0, 8000)}\n\nReturn ONLY the corrected JSON array.`,
+            },
+          ],
+        },
       ],
       null,
       true,
     );
+  }
+
+  /** Text-only reformat of OCR output into the team-parse JSON (P3). */
+  async parseTeamText(ocrText: string, _inv: AIInvocation): Promise<ProviderResult> {
+    return this.generate([{ role: 'user', parts: [{ text: ocrText.slice(0, 6000) }] }], OCR_REFORMAT_PROMPT, false);
   }
 
   async parseTeamImage(imageBase64: string, mimeType: string, _inv: AIInvocation): Promise<ProviderResult> {

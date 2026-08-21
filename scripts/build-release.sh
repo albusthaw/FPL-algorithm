@@ -34,6 +34,8 @@ echo "── assemble payload"
 mkdir -p "${STAGE}/payload/backend"
 cp -a backend/dist "${STAGE}/payload/backend/dist"
 cp backend/package.json backend/package-lock.json "${STAGE}/payload/backend/"
+# P3 (v1.4.1): the OCR language model ships inside the immutable release
+cp -a backend/assets "${STAGE}/payload/backend/assets"
 mkdir -p "${STAGE}/payload/frontend"
 cp -a frontend/dist "${STAGE}/payload/frontend/dist"
 cp version.json "${STAGE}/payload/version.json"

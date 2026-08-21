@@ -104,6 +104,12 @@ export class MockProvider implements AIProviderAdapter {
     return { raw: { players }, text, usage: { promptTokens: 1600, completionTokens: 400, cachedPromptTokens: 0 }, finishReason: 'complete', model: 'mock-vision-1' };
   }
 
+  async parseTeamText(ocrText: string, inv: AIInvocation): Promise<ProviderResult> {
+    // OCR reformat behaves like the vision parse in tests — deterministic
+    void ocrText;
+    return this.parseTeamImage('', 'text/plain', inv);
+  }
+
   async estimateTokens(system: string, runContext: string, batchBlock: string): Promise<number> {
     return Math.ceil((system.length + runContext.length + batchBlock.length) / 4);
   }

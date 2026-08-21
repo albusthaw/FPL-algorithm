@@ -165,8 +165,12 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
   });
 
   /**
-   * Image upload → vision parse → entity resolution → CONFIRMATION payload.
-   * Never auto-trusts OCR: the client must POST /confirm with resolved uids.
+   * Image upload → OCR-first parse (P3) → entity resolution → CONFIRMATION
+   * payload. The ⚙ vision_pipeline ladder: built-in tesseract OCR + a cheap
+   * text-only AI reformat first (works on every provider, ~60-75% fewer
+   * tokens); the provider's vision model is the fallback for screenshots the
+   * OCR cannot read. Never auto-trusts a parse: the client must POST
+   * /confirm with resolved uids.
    */
   app.post('/api/teams/upload-image', async (req, reply) => {
     requireAuth(req);
@@ -182,18 +186,53 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
     const filename = `team-${req.user.id}-${Date.now()}.${file.mimetype.split('/')[1]}`;
     fs.writeFileSync(path.join(uploadsDir, filename), buffer);
 
-    let parseResult;
-    try {
-      parseResult = await parseTeamImage(
-        db,
-        { triggeredByUserId: req.user.id, triggerKind: 'image_parse' },
-        buffer.toString('base64'),
-        file.mimetype,
-      );
-    } catch (err) {
-      const status = (err as { statusCode?: number }).statusCode ?? 500;
-      return reply.code(status).send({ error: (err as Error).message });
+    const pipeline = await getConfig<{ ocr_first: boolean; min_names: number; fallback_vision: boolean }>(db, 'vision_pipeline').catch(
+      () => ({ ocr_first: true, min_names: 8, fallback_vision: true }),
+    );
+    const inv = { triggeredByUserId: req.user.id, triggerKind: 'image_parse' as const };
+    let parseResult: { players: unknown[]; aiCallId: number; credits: number; provider: string } | null = null;
+    let stage: 'ocr' | 'vision' = 'vision';
+    let ocrNote = '';
+
+    if (pipeline.ocr_first) {
+      try {
+        const { ocrTeamImage } = await import('../ocr/parse.js');
+        const ocr = await ocrTeamImage(buffer);
+        ocrNote = `ocr: ${ocr.nameLike} name-like lines, conf ${Math.round(ocr.meanConfidence)}`;
+        if (ocr.nameLike >= pipeline.min_names) {
+          const { parseTeamOcrText } = await import('../ai/gateway.js');
+          parseResult = await parseTeamOcrText(db, inv, ocr.text);
+          if (parseResult && (parseResult.players as unknown[]).length >= pipeline.min_names) {
+            stage = 'ocr';
+          } else {
+            parseResult = null; // too few players recovered — try vision
+          }
+        }
+      } catch (err) {
+        const status = (err as { statusCode?: number }).statusCode;
+        if (status === 402) return reply.code(402).send({ error: (err as Error).message });
+        ocrNote = `ocr failed: ${String(err).slice(0, 120)}`;
+      }
     }
+
+    if (!parseResult) {
+      if (!pipeline.fallback_vision && pipeline.ocr_first) {
+        return reply.code(422).send({ error: `could not read the screenshot with OCR (${ocrNote}) — vision fallback is disabled` });
+      }
+      try {
+        // downscale before the vision call: cheaper tokens, inside size caps
+        const { downscaleForVision } = await import('../ocr/parse.js');
+        const scaled = await downscaleForVision(buffer);
+        parseResult = await parseTeamImage(db, inv, scaled.base64, scaled.mimeType);
+        stage = 'vision';
+      } catch (err) {
+        const status = (err as { statusCode?: number }).statusCode ?? 500;
+        const suffix = ocrNote ? ` (${ocrNote})` : '';
+        return reply.code(status).send({ error: `${(err as Error).message}${suffix}` });
+      }
+    }
+
+    if (!parseResult) return reply.code(422).send({ error: 'no parse produced' }); // unreachable — both branches return or set
 
     // entity resolution against the player DB with ambiguity pickers
     const players = await db('players as p')
@@ -233,7 +272,13 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       .insert({
         user_id: req.user.id,
         image_path: path.join('uploads', filename),
-        parse_result: JSON.stringify({ provider: parseResult.provider, players: parseResult.players, resolved: resolved.map((r) => ({ name: r.parsed.name, best: r.best, ambiguous: r.ambiguous })) }),
+        parse_result: JSON.stringify({
+          provider: parseResult.provider,
+          stage, // 'ocr' (built-in OCR + text reformat) or 'vision' fallback
+          ocr_note: ocrNote,
+          players: parseResult.players,
+          resolved: resolved.map((r) => ({ name: r.parsed.name, best: r.best, ambiguous: r.ambiguous })),
+        }),
         status: 'parsed',
         ai_call_id: parseResult.aiCallId,
       })
@@ -243,6 +288,7 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       uploadId: Number(uploadRow.id ?? uploadRow),
       credits: parseResult.credits,
       provider: parseResult.provider,
+      stage,
       resolved,
     };
   });

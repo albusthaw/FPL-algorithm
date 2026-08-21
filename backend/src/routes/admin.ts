@@ -182,33 +182,78 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     requireAdmin(req);
     const parsed = SecretSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid key payload' });
+    const hint = (v: string): string | null => (v.trim() ? `…${v.trim().slice(-4)}` : null);
+    const oldHint = hint(process.env[parsed.data.env] ?? '');
     try {
       setProviderSecret(parsed.data.env, parsed.data.value);
     } catch (err) {
       if (err instanceof SecretValidationError) return reply.code(422).send({ error: err.message });
       return reply.code(500).send({ error: 'could not save the key' });
     }
+    // X1: append-only audit — env name + last-4 hints only, never values
+    await db('key_audit').insert({
+      env_var: parsed.data.env,
+      actor_user_id: req.user.id,
+      old_hint: oldHint,
+      new_hint: hint(parsed.data.value),
+      action: parsed.data.value.trim() ? 'set' : 'clear',
+    });
     return { ok: true, set: parsed.data.value.trim().length > 0 };
+  });
+
+  // X1: the audit trail for "my key vanished" reports
+  app.get('/api/admin/key-audit', async (req) => {
+    requireAdmin(req);
+    return { audit: await db('key_audit').orderBy('id', 'desc').limit(100) };
   });
 
   // ── AI provider switch (max 1 alive)
   app.get('/api/admin/ai-providers', async (req) => {
     requireAdmin(req);
     const providers = await db('ai_providers').orderBy('key');
+    // P4: resolved capability flags per provider for its CURRENT model —
+    // the picker shows vision/params compatibility before anything breaks
+    const { loadCapabilityConfig } = await import('../ai/gateway.js');
+    const { resolveCapabilities } = await import('../core/ai-capabilities.js');
+    const capCfg = await loadCapabilityConfig(db);
+    const DEFAULT_MODEL: Record<string, string> = {
+      anthropic: 'claude-haiku-4-5',
+      openai: 'gpt-4o-mini',
+      deepseek: 'deepseek-v4-flash',
+      kimi: 'kimi-k2-0711-preview',
+      gemini: 'gemini-2.5-flash',
+      ollama: 'llama3.1:8b',
+      modal: 'default',
+      mock: 'mock-analyst-1',
+    };
     return {
-      providers: providers.map((p) => ({
-        ...p,
-        keyConfigured: keyConfigured(p.key),
-        keyHint: keyHint(p.key),
-        requiresKey: requiresKey(p.key),
-        model: (p.config as { model?: string } | null)?.model ?? null,
-        keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
-          env: f.env,
-          label: f.label,
-          secret: f.secret,
-          set: !!(process.env[f.env] ?? '').trim(),
-        })),
-      })),
+      providers: providers.map((p) => {
+        const cfg = (p.config ?? {}) as { model?: string; vision_model?: string; capabilities?: Record<string, unknown> };
+        const model = cfg.model ?? DEFAULT_MODEL[p.key] ?? '';
+        const caps = resolveCapabilities(capCfg, p.key, model, cfg.capabilities ?? null);
+        const visionModel = cfg.vision_model ?? model;
+        const visionCaps = resolveCapabilities(capCfg, p.key, visionModel, cfg.capabilities ?? null);
+        return {
+          ...p,
+          keyConfigured: keyConfigured(p.key),
+          keyHint: keyHint(p.key),
+          requiresKey: requiresKey(p.key),
+          model: cfg.model ?? null,
+          capabilities: {
+            tokenParam: caps.tokenParam,
+            temperature: caps.temperature,
+            vision: visionCaps.vision,
+            json: caps.json,
+            learned: cfg.capabilities ?? null,
+          },
+          keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
+            env: f.env,
+            label: f.label,
+            secret: f.secret,
+            set: !!(process.env[f.env] ?? '').trim(),
+          })),
+        };
+      }),
     };
   });
 
@@ -261,9 +306,53 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     if (!parsed.success) return reply.code(400).send({ error: 'invalid model name' });
     const row = await db('ai_providers').where({ key }).first();
     if (!row) return reply.code(404).send({ error: 'unknown provider' });
-    const cfg = { ...(row.config ?? {}), model: parsed.data.model };
+    // model change invalidates previously learned param facts
+    const cfg = { ...(row.config ?? {}), model: parsed.data.model, capabilities: null };
     await db('ai_providers').where({ key }).update({ config: JSON.stringify(cfg), updated_at: db.fn.now() });
-    return { ok: true, model: parsed.data.model };
+
+    // P4 probe-and-learn: one tiny live request teaches the param shape for
+    // THIS model; 400s become learned overrides shown in the picker.
+    // Human-triggered (admin action) — never automatic.
+    let probed: Record<string, unknown> | null = null;
+    if (keyConfigured(key)) {
+      try {
+        const { loadCapabilityConfig } = await import('../ai/gateway.js');
+        const capabilityConfig = await loadCapabilityConfig(db);
+        let learnedPatch: Record<string, unknown> | null = null;
+        const adapter = buildAdapter(key, cfg, {
+          capabilityConfig,
+          onLearned: async (patch) => {
+            learnedPatch = { ...(learnedPatch ?? {}), ...patch };
+          },
+        });
+        if (adapter.probeCapabilities) {
+          const caps = await adapter.probeCapabilities();
+          probed = { ...caps };
+          if (learnedPatch) {
+            await db('ai_providers')
+              .where({ key })
+              .update({ config: JSON.stringify({ ...cfg, capabilities: learnedPatch }), updated_at: db.fn.now() });
+          }
+        }
+      } catch (err) {
+        log.warn({ key, err: String(err) }, 'capability probe failed — registry defaults stand');
+      }
+    }
+    return { ok: true, model: parsed.data.model, capabilities: probed };
+  });
+
+  // P4: vision model override (e.g. deepseek-v4-flash-vision-exp) — vision
+  // is a per-MODEL fact, so the provider can route uploads to a sibling model
+  app.put('/api/admin/ai-providers/:key/vision-model', async (req, reply) => {
+    requireAdmin(req);
+    const key = (req.params as { key: string }).key;
+    const parsed = z.object({ model: z.string().max(120).regex(/^[\w.\-:/]*$/) }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid model name' });
+    const row = await db('ai_providers').where({ key }).first();
+    if (!row) return reply.code(404).send({ error: 'unknown provider' });
+    const cfg = { ...(row.config ?? {}), vision_model: parsed.data.model || undefined };
+    await db('ai_providers').where({ key }).update({ config: JSON.stringify(cfg), updated_at: db.fn.now() });
+    return { ok: true, visionModel: parsed.data.model || null };
   });
 
   app.post('/api/admin/ai-providers/deactivate', async (req) => {

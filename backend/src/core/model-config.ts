@@ -1,4 +1,5 @@
 import type { Knex } from 'knex';
+import { DEFAULT_CAPABILITIES } from './ai-capabilities.js';
 
 /**
  * Every constant marked ⚙ in fpl-engines-plan.md lives here as a versioned
@@ -188,8 +189,18 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     wc_horizon_events: 6,
   },
   // AI engine
+  // P4 (v1.4.1): model-capability registry — parameter drift is DATA.
+  // Seeded from core/ai-capabilities.ts; admins edit; probes learn on top.
+  ai_model_capabilities: DEFAULT_CAPABILITIES,
+  // P3 (v1.4.1): OCR-first team-image parsing ladder
+  vision_pipeline: {
+    ocr_first: true,
+    min_names: 8, // OCR must surface at least this many name-like lines
+    fallback_vision: true, // else fall back to the provider's vision model
+  },
   ai: {
     prompt_version: 1,
+    vision_estimate_credits: 4, // X3 BudgetGuard: pre-checked before a vision call
     batch_size: 20,
     max_news_per_player: 5,
     news_snippet_chars: 320,

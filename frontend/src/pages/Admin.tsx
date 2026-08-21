@@ -253,7 +253,8 @@ function ProvidersTab(): ReactNode {
   );
 }
 
-interface AiProvider { key: string; name: string; alive: boolean; supports_vision: boolean; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; model: string | null }
+interface AiCapabilities { tokenParam: string; temperature: string; vision: boolean; json: string; learned: Record<string, unknown> | null }
+interface AiProvider { key: string; name: string; alive: boolean; supports_vision: boolean; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; model: string | null; capabilities?: AiCapabilities }
 
 /** Model choice per AI provider: type one, or load the provider's live list. */
 function ModelPicker({ provider, onSaved }: { provider: AiProvider; onSaved: () => void }): ReactNode {
@@ -357,9 +358,16 @@ function AiTab(): ReactNode {
             </div>
             <p className="mono muted" style={{ fontSize: '.74rem', margin: '8px 0' }}>
               key: {p.keyConfigured ? `✓ set${p.keyHint ? ` (${p.keyHint})` : ''}` : p.requiresKey ? '✗ required' : 'not needed'}
-              {' · '}vision: {p.supports_vision ? 'yes' : 'no'}
               {p.model ? <> · model: <b>{p.model}</b></> : ''}
             </p>
+            {p.capabilities && (
+              <p className="mono muted" style={{ fontSize: '.7rem', margin: '0 0 8px' }} data-testid={`ai-caps-${p.key}`}>
+                model capabilities: {p.capabilities.vision ? 'vision-capable ✓' : 'no vision'}
+                {' · '}<span title="the token-limit parameter this model accepts">{p.capabilities.tokenParam}</span>
+                {' · '}{p.capabilities.temperature === 'omit' ? <b style={{ color: 'var(--brick)' }}>temperature locked</b> : 'temperature free'}
+                {p.capabilities.learned ? ' · learned from live probe' : ''}
+              </p>
+            )}
             {!p.alive && (
               <button
                 className="chip-paper"

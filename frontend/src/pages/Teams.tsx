@@ -72,7 +72,7 @@ export function TeamDetailPage(): ReactNode {
   const [pickerSearch, setPickerSearch] = useState('');
   const [pickerResults, setPickerResults] = useState<MatrixPlayer[]>([]);
   const [resolved, setResolved] = useState<ResolvedSlot[] | null>(null);
-  const [uploadInfo, setUploadInfo] = useState<{ uploadId: number; credits: number; provider: string } | null>(null);
+  const [uploadInfo, setUploadInfo] = useState<{ uploadId: number; credits: number; provider: string; stage?: string } | null>(null);
   const [choices, setChoices] = useState<Record<number, string>>({});
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -140,9 +140,9 @@ export function TeamDetailPage(): ReactNode {
     setUploading(true);
     setError('');
     try {
-      const r = await api.upload<{ uploadId: number; credits: number; provider: string; resolved: ResolvedSlot[] }>('/api/teams/upload-image', file);
+      const r = await api.upload<{ uploadId: number; credits: number; provider: string; stage?: string; resolved: ResolvedSlot[] }>('/api/teams/upload-image', file);
       setResolved(r.resolved);
-      setUploadInfo({ uploadId: r.uploadId, credits: r.credits, provider: r.provider });
+      setUploadInfo({ uploadId: r.uploadId, credits: r.credits, provider: r.provider, stage: r.stage });
       const initial: Record<number, string> = {};
       r.resolved.forEach((slot, i) => {
         if (slot.best) initial[i] = slot.best;
@@ -204,7 +204,10 @@ export function TeamDetailPage(): ReactNode {
 
         {resolved && (
           <div className="card-shade" style={{ marginBottom: 24 }} data-testid="confirm-screen">
-            <p className="kicker">Confirmation required — parsed by {uploadInfo?.provider} ({uploadInfo?.credits} credits). Nothing is saved until you confirm.</p>
+            <p className="kicker">
+              Confirmation required — parsed via {uploadInfo?.stage === 'ocr' ? 'built-in OCR + ' : ''}{uploadInfo?.provider} ({uploadInfo?.credits} credits
+              {uploadInfo?.stage === 'ocr' ? ', token-saving OCR path' : ''}). Nothing is saved until you confirm.
+            </p>
             <div className="table-wrap">
               <table style={{ minWidth: 560 }}>
                 <thead><tr><th>#</th><th>Parsed</th><th>Resolves to</th><th>Confidence</th></tr></thead>

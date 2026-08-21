@@ -1,5 +1,59 @@
 # Changelog
 
+## v1.4.1 — 2026-08-21 · schema 11
+
+Migration 0011 (`key_audit`). engineupgradeplus.md release 1 — "stop the
+bleeding": the two live bugs (key wipe X1, OpenAI vision 400 X4) plus the
+mechanisms that end their bug classes (P4 capability registry, P3 OCR-first
+image parsing, X3 vision budget guard).
+
+- **X1 — API keys can no longer be silently wiped**: `upsertEnvVar` now
+  takes an exclusive lock file around its read-modify-write of
+  `shared/.env` (O_EXCL, stale-lock takeover, atomic tmp+rename, mode 600),
+  resolves the env file once through `realpath` (ENV_FILE wins), and every
+  admin key change writes a `key_audit` row (env var, actor, old/new last-4
+  hint, set/clear — never the value). The server logs a provider
+  key-presence report at boot, and `rehearse-upgrade.sh` now plants a
+  synthetic key before upgrading and fails the rehearsal if the env-merge
+  loses it.
+- **P4 — AI model-capability registry** (⚙ `ai_model_capabilities`): ordered
+  pattern rules resolve per-(provider, model) capabilities — token
+  parameter (`max_tokens` vs `max_completion_tokens`), temperature
+  free/locked, per-MODEL vision, JSON mode, max-output floor. All five
+  adapters (openai-compatible, anthropic, gemini, ollama, mock) build
+  request bodies from the registry, never hard-coded params. This fixes the
+  reported bug: image upload with OpenAI gpt-5-era models 400'd with
+  "Unsupported parameter: 'max_tokens'… use 'max_completion_tokens'".
+- **Learned capability overrides**: a live 400 that names the fix is parsed
+  (`learnFromParamError`), the request is retried once with the corrected
+  parameter, and the lesson is persisted to `ai_providers.config.capabilities`
+  — the AI-side mirror of ingest entitlement learning. Selecting a model in
+  the admin panel fires a 16-token capability probe; the admin AI card shows
+  the resolved capabilities (vision / token param / temperature) per
+  provider, plus a vision-model override (unlocks e.g. DeepSeek's separate
+  vision model).
+- **Anthropic/Gemini correctness**: repair-retry messages are user-role-only
+  (assistant-first messages 400 on current Anthropic models); temperature is
+  omitted for the 4.6+/5-family; Gemini 2.5-era gets max-output headroom for
+  thinking tokens; default Anthropic models bumped to current IDs.
+- **X3 — vision budget guard**: non-admin image parses are refused (402)
+  before the AI call when the token balance is under
+  ⚙ `ai.vision_estimate_credits`; a `finish_reason: length` truncation now
+  returns 422 "truncated" instead of a JSON-parse error.
+- **P3 — OCR-first image parsing** (⚙ `vision_pipeline`): team screenshots
+  are OCR'd locally first (tesseract.js WASM + sharp preprocessing: 2×
+  upscale, grayscale, normalise, sharpen, auto-negate on dark themes; the
+  eng.traineddata model ships inside the release payload, cache under
+  DATA_DIR). When ≥ `min_names` name-like lines are found, the noisy text
+  goes to the TEXT model to reformat into the 15-player contract — no vision
+  tokens spent. Vision remains the fallback ladder (images downscaled to
+  ≤1568px JPEG before upload). The Teams page shows which path parsed the
+  image.
+- Tests: 15 new unit tests (registry resolution, learned-retry against a
+  fake 400, adapter body shapes per provider, env-lock 20-writer race, real
+  OCR extraction from a synthetic FPL-style screenshot). 125 backend tests
+  green.
+
 ## v1.4.0 — 2026-08-21 · schema 10
 
 Migration 0010 (news engine + history ledger). The data-provider system
