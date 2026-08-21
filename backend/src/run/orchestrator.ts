@@ -117,7 +117,7 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
     if (newsProvider) {
       const result = await guardedPull(db, newsProvider.key, 'latest', 'run', async () => {
         const { pullNews } = await import('../ingest/adapters/newsdata.js');
-        return pullNews(db);
+        return pullNews(db, { maxClubs: 20 }); // a human-triggered Run sweeps every club
       });
       if (!result) degradations.push('news pull degraded — continuing with existing news');
     } else {

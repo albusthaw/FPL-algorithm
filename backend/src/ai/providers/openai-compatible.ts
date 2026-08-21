@@ -16,6 +16,7 @@ export interface OpenAICompatibleOpts {
   jsonMode?: 'json_object' | 'json_schema' | 'none';
   extraHeaders?: Record<string, string>;
   timeoutMs?: number;
+  maxTokens?: number; // reasoning-style models spend completion tokens thinking — give them room
   fetchFn?: typeof fetch;
 }
 
@@ -71,7 +72,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
       model: this.opts.model,
       messages,
       temperature: 0.2,
-      max_tokens: 4096,
+      max_tokens: this.opts.maxTokens ?? 4096,
     };
     if (useJsonMode) {
       if (this.opts.jsonMode === 'json_schema') {
@@ -145,7 +146,7 @@ export class OpenAICompatibleAdapter implements AIProviderAdapter {
         },
       ],
       temperature: 0,
-      max_tokens: 4096,
+      max_tokens: this.opts.maxTokens ?? 4096,
     };
     const fetchFn = this.opts.fetchFn ?? fetch;
     const res = await fetchFn(`${this.opts.baseUrl}/chat/completions`, {

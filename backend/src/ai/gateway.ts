@@ -74,6 +74,7 @@ export function buildAdapter(key: string, providerConfig: Record<string, unknown
         supportsNativeJsonSchema: false,
         jsonMode: 'json_object',
         timeoutMs: 120_000, // dynamic rate limiting holds requests open
+        maxTokens: 8192, // v4-flash spends completion tokens reasoning before the JSON
       });
     case 'kimi':
       return new OpenAICompatibleAdapter({
@@ -266,7 +267,11 @@ export async function analysePlayers(
 
   const runContext = buildRunContext(opts.gameweek, opts.deadlineIso, '');
 
-  for (const batch of batches) {
+  // queue-based so a length-truncated batch can split in two and requeue —
+  // the ONLY auto-split (§7); halves are marked and never split again
+  const queue: { items: PlayerNewsBundle[]; isSplit: boolean }[] = batches.map((b) => ({ items: b, isSplit: false }));
+  while (queue.length > 0) {
+    const { items: batch, isSplit } = queue.shift()!;
     outcome.batches++;
     const batchBlock = buildBatchBlock(batch);
     const expectedUids = new Set(batch.map((b) => b.playerUid));
@@ -300,7 +305,16 @@ export async function analysePlayers(
 
     if (result.finishReason === 'filtered' || result.finishReason === 'refused') {
       outcome.failedBatches++;
-      outcome.warnings.push(`batch ${result.finishReason} by provider — players keep stale adjustments`);
+      outcome.warnings.push(`batch ${result.finishReason} by provider — players keep previous adjustments`);
+      continue;
+    }
+
+    // truncated output cannot be repaired — split in two and retry once each
+    if (result.finishReason === 'length' && batch.length > 1 && !isSplit) {
+      const mid = Math.ceil(batch.length / 2);
+      queue.push({ items: batch.slice(0, mid), isSplit: true });
+      queue.push({ items: batch.slice(mid), isSplit: true });
+      outcome.warnings.push(`batch of ${batch.length} hit the output limit — split in two and retried`);
       continue;
     }
 

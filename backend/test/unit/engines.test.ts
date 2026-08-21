@@ -445,3 +445,25 @@ describe('cold start (fresh install, no match history)', () => {
     expect(nailedOn.pStart).toBeGreaterThan(0.9); // start-share table wins, ownership irrelevant
   });
 });
+
+describe('captaincy P90 ceiling (seeded simulation)', () => {
+  it('a striker haul ceiling beats a defender floor even at a lower mean', async () => {
+    const { mulberry32, simulateP90 } = await import('../../src/match/engine.js');
+    const scoring = { goal: { GK: 6, DEF: 6, MID: 5, FWD: 4 }, clean_sheet: { GK: 4, DEF: 4, MID: 1, FWD: 0 }, assist: 3 };
+    // shapes taken from the live run: Gabriel-like DEF (CS-heavy, mean ~5.5)
+    // vs Haaland-like FWD (goal-heavy, mean ~4.6)
+    const defRow = { p60: 0.79, p_any: 0.9, e_goals: 0.117, e_assists: 0.058, p_cs: 0.602, p_defcon: 0.383, e_saves: 0, e_bonus: 0.45 };
+    const fwdRow = { p60: 0.69, p_any: 0.92, e_goals: 0.564, e_assists: 0.082, p_cs: 0.33, p_defcon: 0.001, e_saves: 0, e_bonus: 0.56 };
+    const defP90 = simulateP90([defRow], 'DEF', scoring, mulberry32(42));
+    const fwdP90 = simulateP90([fwdRow], 'FWD', scoring, mulberry32(42));
+    expect(fwdP90).toBeGreaterThan(defP90);
+    // deterministic: same seed, same result
+    expect(simulateP90([fwdRow], 'FWD', scoring, mulberry32(42))).toBe(fwdP90);
+  });
+
+  it('empty fixture list yields zero ceiling (blank gameweek)', async () => {
+    const { mulberry32, simulateP90 } = await import('../../src/match/engine.js');
+    const scoring = { goal: { FWD: 4 }, clean_sheet: { FWD: 0 }, assist: 3 };
+    expect(simulateP90([], 'FWD', scoring, mulberry32(1))).toBe(0);
+  });
+});
