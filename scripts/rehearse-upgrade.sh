@@ -22,7 +22,9 @@ export DB_USER_OVERRIDE="fpl_rhrsl_$$"
 export APP_PORT="$((3200 + RANDOM % 500))"
 export LOG_DIR="${REHEARSAL_ROOT}/logs"
 export NO_SYSTEMD=true
-export ADMIN_EMAIL="rehearsal@localhost"
+export NO_NGINX=true
+# must be a zod-valid email — the rehearsal logs in with it via /api/auth/login
+export ADMIN_EMAIL="rehearsal@example.test"
 
 cleanup() {
   echo "── cleaning up rehearsal prefix + database"
@@ -53,13 +55,29 @@ PREV_VERSION="$(api /api/health | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"
 echo "   installed: v${PREV_VERSION}"
 
 echo ""
-echo "── 2. seed a marker row (user data must survive the upgrade)"
+echo "── 2. seed markers (user data + site + credentials must survive the upgrade)"
 MARKER="rehearsal-marker-$$"
 DB_PASSWORD_VALUE="$(grep '^DB_PASSWORD=' "${APP_DIR}/shared/.env" | cut -d= -f2)"
 PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U "${DB_USER_OVERRIDE}" -d "${DB_NAME_OVERRIDE}" -c \
   "INSERT INTO feature_states (name, enabled, manifest) VALUES ('${MARKER}', true, '{}') ON CONFLICT DO NOTHING" >/dev/null
 
+CRED_PATH="${APP_DIR}/shared/credentials.txt"
+
 if [ -n "${NEW_ZIP}" ]; then
+  # site + credentials markers: a pre-1.0.2 previous release has neither —
+  # inject synthetic ones so the preservation guard is exercised for real
+  if ! grep -q '^SITE_DOMAIN=' "${APP_DIR}/shared/.env"; then
+    echo "SITE_DOMAIN=rehearsal-site.example.test" >> "${APP_DIR}/shared/.env"
+    echo "   injected synthetic SITE_DOMAIN (previous release predates it)"
+  fi
+  if [ ! -f "${CRED_PATH}" ]; then
+    printf 'admin email:    rehearsal@localhost\nadmin password: marker-password-%s\n' "$$" > "${CRED_PATH}"
+    chmod 600 "${CRED_PATH}"
+    echo "   injected synthetic credentials file"
+  fi
+  SITE_BEFORE_UPGRADE="$(grep '^SITE_DOMAIN=' "${APP_DIR}/shared/.env" | cut -d= -f2)"
+  CRED_HASH_BEFORE_UPGRADE="$(sha256sum "${CRED_PATH}" | cut -d' ' -f1)"
+
   echo ""
   echo "── 3. upgrade with the new zip"
   NEW_DIR="${REHEARSAL_ROOT}/new"
@@ -79,7 +97,11 @@ if [ -n "${NEW_ZIP}" ]; then
   [ "$(readlink -f "${APP_DIR}/current")" = "$(readlink -f "${APP_DIR}/releases/${NEW_VERSION}")" ] || { echo "FAIL: symlink"; exit 1; }
   MARKER_OK="$(PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U "${DB_USER_OVERRIDE}" -d "${DB_NAME_OVERRIDE}" -tAc "SELECT count(*) FROM feature_states WHERE name='${MARKER}'")"
   [ "${MARKER_OK}" = "1" ] || { echo "FAIL: user data lost in upgrade"; exit 1; }
-  echo "   user data survived ✓ · symlink flipped ✓"
+  SITE_AFTER_UPGRADE="$(grep '^SITE_DOMAIN=' "${APP_DIR}/shared/.env" | cut -d= -f2)"
+  [ "${SITE_AFTER_UPGRADE}" = "${SITE_BEFORE_UPGRADE}" ] || { echo "FAIL: upgrade changed SITE_DOMAIN ${SITE_BEFORE_UPGRADE} → ${SITE_AFTER_UPGRADE}"; exit 1; }
+  CRED_HASH_AFTER_UPGRADE="$(sha256sum "${CRED_PATH}" | cut -d' ' -f1)"
+  [ "${CRED_HASH_AFTER_UPGRADE}" = "${CRED_HASH_BEFORE_UPGRADE}" ] || { echo "FAIL: upgrade changed the credentials file"; exit 1; }
+  echo "   user data survived ✓ · symlink flipped ✓ · site unchanged (${SITE_AFTER_UPGRADE}) ✓ · credentials file unchanged ✓"
 
   PREV_SCHEMA="$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('${PREV_DIR}/payload/version.json','utf8')).schema))")"
   NEW_SCHEMA="$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('${NEW_DIR}/payload/version.json','utf8')).schema))")"
@@ -101,9 +123,25 @@ if [ -n "${NEW_ZIP}" ]; then
   fi
 else
   echo ""
-  echo "── 3. idempotency: run install.sh a second time (must not fail)"
+  echo "── 3. fresh-install assertions: default domain, credentials file, working login"
+  grep -q '^SITE_DOMAIN=fpl.minthantthaw.me$' "${APP_DIR}/shared/.env" || { echo "FAIL: default SITE_DOMAIN not written"; exit 1; }
+  [ -f "${CRED_PATH}" ] || { echo "FAIL: credentials file not created"; exit 1; }
+  ADMIN_EMAIL_SAVED="$(sed -n 's/^admin email:[[:space:]]*//p' "${CRED_PATH}")"
+  ADMIN_PW_SAVED="$(sed -n 's/^admin password:[[:space:]]*//p' "${CRED_PATH}")"
+  [ -n "${ADMIN_EMAIL_SAVED}" ] && [ -n "${ADMIN_PW_SAVED}" ] || { echo "FAIL: credentials file missing fields"; exit 1; }
+  LOGIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${APP_PORT}/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"${ADMIN_EMAIL_SAVED}\",\"password\":\"${ADMIN_PW_SAVED}\"}")"
+  [ "${LOGIN_CODE}" = "200" ] || { echo "FAIL: saved credentials do not log in (HTTP ${LOGIN_CODE})"; exit 1; }
+  echo "   default domain ✓ · credentials file ✓ · saved credentials log in ✓"
+
+  echo ""
+  echo "── 4. idempotency: run install.sh a second time (must not fail, creds unchanged)"
+  CRED_HASH_1="$(sha256sum "${CRED_PATH}" | cut -d' ' -f1)"
   bash "${PREV_DIR}/install.sh"
-  echo "   second install ok ✓"
+  CRED_HASH_2="$(sha256sum "${CRED_PATH}" | cut -d' ' -f1)"
+  [ "${CRED_HASH_1}" = "${CRED_HASH_2}" ] || { echo "FAIL: second install changed the credentials file"; exit 1; }
+  echo "   second install ok ✓ · credentials unchanged ✓"
 fi
 
 echo ""

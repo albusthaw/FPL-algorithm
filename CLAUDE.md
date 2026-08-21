@@ -43,6 +43,15 @@ upgrade will break or destroy data:
   `./uploads`-style path is a data-loss bug at the next symlink flip.
 - New env keys must get a default or be added by `upgrade.sh`'s env-merge
   step; the old `shared/.env` will not have them.
+- **Site + credentials are install-owned, never upgrade-owned.** The site
+  domain (`SITE_DOMAIN` in `shared/.env`, default `fpl.minthantthaw.me`,
+  prompted by install.sh/reinstall.sh), the nginx server block, and
+  `shared/credentials.txt` (admin sign-in, written when the admin is
+  created, chmod 600) are NEVER written by `upgrade.sh` — it only detects
+  and displays them, and its final step
+  (`verify site + credentials unchanged`) fails the upgrade if they moved.
+  All three scripts end by displaying the admin email/password (SIGN-IN
+  block) from `shared/credentials.txt`. Keep it that way.
 
 ### 1d. How to repack the release zip (i.zip)
 The release artifact is built by `scripts/build-release.sh`. To repack:
