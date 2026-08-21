@@ -13,6 +13,10 @@ source "${SCRIPT_DIR}/lib.sh"
 PURGE=false
 [ "${1:-}" = "--purge" ] && PURGE=true
 
+# prerequisites first — reinstall touches the database (park/purge) before
+# delegating to install.sh, so psql must exist even on a stripped box
+run_step "prerequisites (install if missing)" ensure_prerequisites install
+
 console ""
 if [ "${PURGE}" = "true" ]; then
   console "  ${C_RED}REINSTALL --purge will PERMANENTLY DESTROY:${C_OFF}"
@@ -29,7 +33,8 @@ if [ "${PURGE}" = "true" ]; then
   purge_all() {
     service_stop
     if psql_super -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
-      psql_super -c "DROP DATABASE ${DB_NAME}"
+      psql_super -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}' AND pid <> pg_backend_pid()" >/dev/null
+      psql_super -c "DROP DATABASE \"${DB_NAME}\""
     fi
     rm -rf "${APP_DIR}/shared"
   }
