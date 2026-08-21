@@ -185,6 +185,16 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
   // v1.4.2 P1: selected subscription tier per provider (snapshot of the
   // chosen PlanTier from ingest/plans.ts); admin plan selector writes here
   provider_plans: DEFAULT_PROVIDER_PLANS,
+  // A2 (v1.4.4): ownership-scaled price-change threshold model — θ_base is
+  // refit nightly by calibratePriceModel as new config versions
+  price_model: {
+    theta_base: 90000,
+    ownership_power: 0.45,
+    ownership_floor: 0.5,
+    predict_min_p: 0.6,
+    calibrate_step: 0.1,
+    calibrate_min_events: 5,
+  },
   // L5 DEFCON
   defcon: { window_matches: 15, mult_range: [0.8, 1.25] },
   // L7 bonus v1 empirical profile table (expected bonus given event profile)

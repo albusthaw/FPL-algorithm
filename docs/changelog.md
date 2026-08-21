@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.4.4 — 2026-08-21 · schema 13
+
+Migration 0013 (`live_event_stats`, `price_predictions`). engineupgradeplus.md
+release 4 — "the live gameweek": in-play scoring, team sheets, one merged
+availability truth, and price intelligence.
+
+- **B3 — live gameweek engine** (fixes M2): FPL's free `event/{gw}/live` +
+  `fixtures?event=` endpoints finally used. A 2-minute in-play poll persists
+  per-player live stats with our OWN bonus projection from the BPS boards
+  (3/2/1 with FPL's exact tie sharing — property-tested), keeps fixture
+  states/scores current, and pushes the X2 SSE data channel
+  (`/api/live/stream`) so open dashboards refresh within a poll of reality.
+  `GET /api/live` serves the scoreboard, the top-points board, the price
+  ticker, and — with `?teamId=` — YOUR live total with auto-sub preview
+  (bench order, formation minimums, GK-for-GK) and effective-captain
+  doubling (vice steps in when the captain blanks). Dashboard gained the
+  gameweek clock: deadline countdown, LIVE scores, projected bonus, ticker.
+- **B2 — predicted + confirmed XIs** (fixes S2): every run now writes a
+  predicted XI per next-event fixture from our own minutes model
+  (formation-valid, `lineups` kind=predicted); the fixture preview endpoint
+  returns predicted AND confirmed sheets. API-Football fixture ids are
+  mapped daily (kickoff+team-pair matching, entitlement-learned), the
+  KO-window job pulls confirmed sheets T−90→KO for mapped fixtures, and a
+  landed sheet triggers ONE `mini_lineup` fast-path run — the orchestrator
+  now honors the kind: no news pull, no indexing, no re-sync, straight to
+  stats → match → publish (AI structurally unreachable, as ever).
+- **A3/C3 — availability reconciliation** (fixes S3: the table shipped in
+  0004 with no writer): one pass merges FPL flags + chance_next, active
+  structured injuries, and tier-1/2 news-text hints into
+  `availability_state` per (player, next fixture) — p_available, a state
+  label, evidence, and a CONFLICT flag when FPL says fine but the press
+  says out. C3's return-date extraction parses "out for six weeks" /
+  "ruled out for 2-3 weeks" / FPL's "Expected back 15 Nov" into dates and
+  compares them to the kickoff. L3 minutes now consume the reconciled cap.
+  Runs after every bootstrap sync window and inside every full run.
+- **A2 — price intelligence** (fixes S9's noisy momentum too): an
+  ownership-scaled threshold model (⚙ `price_model`,
+  θ = θ_base · (own%/10)^power) predicts tonight's risers/fallers at 22:30
+  UTC into `price_predictions`; each morning the calls are scored against
+  actual `price_events` and θ_base is refit as a NEW config version
+  (over-calling raises the bar, missing real moves lowers it — data, not
+  code). `GET /api/prices/predictions` serves the board with yesterday's
+  scorecard; Weekly's price-risk panel gained fall-urgency
+  (tonight/soon/watch); the L12 momentum z-term now normalises net
+  transfers by the same ownership-aware threshold.
+- Tests: 13 new (bonus tie-sharing matrix, auto-sub rules incl. formation
+  minimums, live poller against a fake FPL, return-date extraction,
+  reconciliation conflicts, threshold scaling + calibration raising θ).
+  161 backend tests green.
+
 ## v1.4.3 — 2026-08-21 · schema 12 (no migration)
 
 engineupgradeplus.md release 3 — "the nervous system": the keyless RSS

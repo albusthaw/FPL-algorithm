@@ -284,6 +284,48 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
     await db('target_lists').insert(targetRows.slice(i, i + 500));
   }
 
+  // ── B2 (v1.4.4): predicted XI per next-event fixture from OUR OWN minutes
+  // model (pfp p_start), formation-valid (1 GK, ≥3 DEF, ≥2 MID, ≥1 FWD).
+  // Confirmed sheets (api-football, KO window) overwrite nothing here — they
+  // live under kind='confirmed' and outrank these downstream.
+  const MINS: [string, number][] = [['GK', 1], ['DEF', 3], ['MID', 2], ['FWD', 1]];
+  for (const f of windowFx.filter((x) => x.event === nextEvent)) {
+    for (const side of ['home', 'away'] as const) {
+      const teamUid = side === 'home' ? f.home_team_uid : f.away_team_uid;
+      const rows = (pfpByFixture.get(f.fixture_uid) ?? [])
+        .filter((r) => playerMeta.get(r.player_uid)?.team_uid === teamUid)
+        .map((r) => ({ uid: r.player_uid, position: playerMeta.get(r.player_uid)!.position as string, pStart: Number(r.p_start) }))
+        .sort((a, b) => b.pStart - a.pStart);
+      if (rows.length < 11) continue;
+      const picked: typeof rows = [];
+      const taken = new Set<string>();
+      for (const [pos, min] of MINS) {
+        for (const r of rows.filter((x) => x.position === pos).slice(0, min)) {
+          picked.push(r);
+          taken.add(r.uid);
+        }
+      }
+      for (const r of rows) {
+        if (picked.length >= 11) break;
+        if (taken.has(r.uid)) continue;
+        if (r.position === 'GK') continue; // exactly one keeper
+        picked.push(r);
+        taken.add(r.uid);
+      }
+      if (picked.length < 11) continue;
+      const bench = rows.filter((r) => !taken.has(r.uid)).slice(0, 7);
+      const count = (pos: string): number => picked.filter((p) => p.position === pos).length;
+      await db.raw(
+        `INSERT INTO lineups (fixture_uid, team_uid, kind, formation, starters, bench, as_of)
+         VALUES (?, ?, 'predicted', ?, ?, ?, now())
+         ON CONFLICT (fixture_uid, team_uid, kind) DO UPDATE
+           SET formation = excluded.formation, starters = excluded.starters,
+               bench = excluded.bench, as_of = now()`,
+        [f.fixture_uid, teamUid, `${count('DEF')}-${count('MID')}-${count('FWD')}`, JSON.stringify(picked.map((p) => p.uid)), JSON.stringify(bench.map((p) => p.uid))],
+      );
+    }
+  }
+
   // ── DGW/BGW detection over the projection window (pure counting)
   const allFixtures = await db('fixtures')
     .whereIn('event', events.slice(0, cfg.dgw_projection_events))

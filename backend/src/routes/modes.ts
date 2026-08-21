@@ -254,12 +254,26 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       .whereIn('pm.player_uid', teamPlayers)
       .whereNot('pm.injury_status', 'fit')
       .select('pm.player_uid as uid', 'p.web_name', 'pm.injury_status', 'pm.injury_detail');
-    const priceRisk = await db('player_matrix as pm')
-      .join('players as p', 'p.uid', 'pm.player_uid')
-      .where('pm.run_id', runId)
-      .whereIn('pm.player_uid', teamPlayers)
-      .where('pm.transfers_in_net', '<', -30000)
-      .select('pm.player_uid as uid', 'p.web_name', 'pm.transfers_in_net');
+    // A2 (v1.4.4): sell-urgency from the price model — an imminent predicted
+    // fall (tonight's window) outranks the raw transfer counter
+    const fromDate = new Date(Date.now() - 12 * 3600_000).toISOString().slice(0, 10);
+    const fallPreds = (await db('price_predictions')
+      .whereIn('player_uid', teamPlayers)
+      .where('for_date', '>=', fromDate)
+      .where('direction', 'fall')) as { player_uid: string; p: string }[];
+    const fallBy = new Map(fallPreds.map((f) => [f.player_uid, Number(f.p)]));
+    const priceRisk = (
+      await db('player_matrix as pm')
+        .join('players as p', 'p.uid', 'pm.player_uid')
+        .where('pm.run_id', runId)
+        .whereIn('pm.player_uid', teamPlayers)
+        .where((q) => q.where('pm.transfers_in_net', '<', -30000).orWhereIn('pm.player_uid', [...fallBy.keys()]))
+        .select('pm.player_uid as uid', 'p.web_name', 'pm.transfers_in_net')
+    ).map((r) => ({
+      ...r,
+      fallP: fallBy.get(r.uid) ?? null,
+      urgency: fallBy.has(r.uid) ? ((fallBy.get(r.uid) ?? 0) >= 0.85 ? 'tonight' : 'soon') : 'watch',
+    }));
 
     // captaincy pool + match-engine targets for this GW
     const captaincy = await db('target_lists as tl')
@@ -346,9 +360,32 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       .limit(5)
       .select('season', 'kickoff_utc', 'home_team_uid', 'home_score', 'away_score');
 
+    // B2 (v1.4.4): predicted XI (our minutes model) + confirmed sheets
+    const lineupRows = (await db('lineups').where('fixture_uid', uid).select('team_uid', 'kind', 'formation', 'starters')) as {
+      team_uid: string;
+      kind: string;
+      formation: string | null;
+      starters: string[];
+    }[];
+    const allStarterUids = [...new Set(lineupRows.flatMap((l) => l.starters ?? []))];
+    const nameRows =
+      allStarterUids.length > 0
+        ? ((await db('players').whereIn('uid', allStarterUids).select('uid', 'web_name', 'position')) as { uid: string; web_name: string; position: string }[])
+        : [];
+    const nameBy = new Map(nameRows.map((r) => [r.uid, r]));
+    const sideLineups = (teamUid: string): Record<string, unknown> => {
+      const of = (kind: string): unknown => {
+        const l = lineupRows.find((r) => r.team_uid === teamUid && r.kind === kind);
+        if (!l) return null;
+        return { formation: l.formation, starters: (l.starters ?? []).map((u) => nameBy.get(u) ?? { uid: u, web_name: u.slice(0, 10), position: '?' }) };
+      };
+      return { predicted: of('predicted'), confirmed: of('confirmed') };
+    };
+
     return {
       runId,
       fixture: { uid, event: fx.event, kickoff: fx.kickoff_utc, home: fx.home, away: fx.away, homeName: fx.home_name, awayName: fx.away_name },
+      lineups: { home: sideLineups(fx.home_team_uid), away: sideLineups(fx.away_team_uid) },
       probabilities: { home: Number(pred.p_home), draw: Number(pred.p_draw), away: Number(pred.p_away) },
       cleanSheets: { home: Number(pred.p_cs_home), away: Number(pred.p_cs_away) },
       lambdas: { home: lh, away: la },

@@ -19,6 +19,7 @@ import { runRoutes } from './routes/runs.js';
 import { teamRoutes } from './routes/teams.js';
 import { modeRoutes } from './routes/modes.js';
 import { newsRoutes } from './routes/news.js';
+import { liveRoutes } from './routes/live.js';
 import { startScheduler } from './run/scheduler.js';
 
 export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance> {
@@ -57,6 +58,7 @@ export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance
   await app.register(teamRoutes, { db });
   await app.register(modeRoutes, { db });
   await app.register(newsRoutes, { db });
+  await app.register(liveRoutes, { db });
 
   // static frontend (frontend/dist next to backend/ per the release layout)
   const frontendDist = [

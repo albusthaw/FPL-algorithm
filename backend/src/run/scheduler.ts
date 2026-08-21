@@ -136,6 +136,101 @@ export function startScheduler(db: Knex): void {
     }
   });
 
+  // B3 (v1.4.4): live poll every 2 min while matches are in play — persists
+  // live_event_stats + projected bonus and pushes the SSE data channel.
+  // Statistical only; failures wait for the next tick.
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      if ((await matchdayPhase(db)) !== 'in_play') return;
+      const { pollLiveOnce } = await import('../match/live.js');
+      await pollLiveOnce(db);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'live poll failed');
+    }
+  });
+
+  // B2 (v1.4.4): KO-window job — confirmed team sheets land T−60→T−20.
+  // Behind entitlements (free plans learn the denial once); a landed sheet
+  // triggers ONE mini_lineup fast-path run (ai: null by construction).
+  const lineupPulled = new Set<string>();
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      if ((await matchdayPhase(db)) !== 'ko_window') return;
+      const enabled = await db('api_providers').where({ key: 'api_football', enabled: true }).first('key');
+      if (!enabled) return;
+      const soon = (await db('fixtures')
+        .whereBetween('kickoff_utc', [new Date(), new Date(Date.now() + 90 * 60_000)])
+        .select('fixture_uid', 'stats')) as { fixture_uid: string; stats: { af_id?: number } | null }[];
+      let confirmedAny = false;
+      for (const fx of soon) {
+        const afId = fx.stats?.af_id;
+        if (!afId || lineupPulled.has(fx.fixture_uid)) continue;
+        const { guardedPull } = await import('../ingest/gateway.js');
+        const r = await guardedPull(db, 'api_football', 'lineups', fx.fixture_uid, async () => {
+          const { pullLineups } = await import('../ingest/adapters/api-football.js');
+          return pullLineups(db, fx.fixture_uid, afId);
+        });
+        if (r?.confirmed) {
+          lineupPulled.add(fx.fixture_uid);
+          confirmedAny = true;
+        }
+      }
+      if (confirmedAny && !(await getLiveRun(db))) {
+        await startRun(db, { kind: 'mini_lineup', triggeredBy: null, ai: null });
+        log.info('confirmed team sheets landed — mini_lineup fast-path run started');
+      }
+    } catch (err) {
+      log.warn({ err: String(err) }, 'KO-window lineup job failed');
+    }
+  });
+
+  // B2 (v1.4.4): daily fixture-id mapping for the KO-window jobs (paid scope
+  // on the free plan — guardedPull learns the denial once, never hammers)
+  cron.schedule('30 5 * * *', async () => {
+    try {
+      const enabled = await db('api_providers').where({ key: 'api_football', enabled: true }).first('key');
+      if (!enabled) return;
+      const { guardedPull } = await import('../ingest/gateway.js');
+      const season = new Date().getUTCMonth() >= 7 ? new Date().getUTCFullYear() : new Date().getUTCFullYear() - 1;
+      await guardedPull(db, 'api_football', 'fixtures-map', `map-${season}`, async () => {
+        const { mapApiFootballFixtures } = await import('../ingest/adapters/api-football.js');
+        return mapApiFootballFixtures(db, season);
+      });
+    } catch (err) {
+      log.warn({ err: String(err) }, 'fixture-id mapping failed');
+    }
+  });
+
+  // A2 (v1.4.4): price intelligence — predictions at 22:30 UTC for tonight's
+  // change window, calibration against actual price_events after the 02:15
+  // bootstrap sync has recorded them
+  cron.schedule('30 22 * * *', async () => {
+    try {
+      const { predictPriceMoves } = await import('../stats/prices.js');
+      await predictPriceMoves(db);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'price prediction pass failed');
+    }
+  });
+  cron.schedule('45 2 * * *', async () => {
+    try {
+      const { calibratePriceModel } = await import('../stats/prices.js');
+      await calibratePriceModel(db);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'price calibration failed');
+    }
+  });
+
+  // A3 (v1.4.4): availability reconciliation after each bootstrap sync window
+  cron.schedule('20 */6 * * *', async () => {
+    try {
+      const { writeAvailabilityState } = await import('../stats/availability.js');
+      await writeAvailabilityState(db);
+    } catch (err) {
+      log.warn({ err: String(err) }, 'availability reconciliation failed');
+    }
+  });
+
   // C5 (v1.4.3): daily player-photo cache pass (DATA_DIR/media, served
   // same-origin — the SPA's CSP blocks external image hosts by design)
   cron.schedule('0 5 * * *', async () => {

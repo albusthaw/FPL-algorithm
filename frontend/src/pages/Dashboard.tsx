@@ -45,6 +45,34 @@ interface FeedItem {
   players: { uid: string; web_name: string; photo: string | null }[];
 }
 
+// B3 (v1.4.4): the live gameweek surface
+interface LiveData {
+  event: number | null;
+  eventName: string | null;
+  nextDeadline: string | null;
+  nextEventName: string | null;
+  fixtures: { fixture_uid: string; kickoff_utc: string | null; state: string; home_score: number | null; away_score: number | null; home: string; away: string }[];
+  board: { uid: string; web_name: string; position: string; club: string; minutes: number; goals: number; assists: number; bps: number; bonus: number; projected_bonus: number; total_points: number }[];
+  priceTicker: {
+    moves: { uid: string; web_name: string; old_cost: number; new_cost: number; event_date: string }[];
+    predictions: { uid: string; web_name: string; direction: string; p: string; net_transfers: string }[];
+  };
+}
+
+function Countdown({ to }: { to: string }): ReactNode {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const ms = new Date(to).getTime() - now;
+  if (ms <= 0) return <b>deadline passed</b>;
+  const d = Math.floor(ms / 86_400_000);
+  const h = Math.floor((ms % 86_400_000) / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return <b className="mono">{d > 0 ? `${d}d ` : ''}{h}h {m}m</b>;
+}
+
 const SIGNAL_BADGE: Record<string, { label: string; bad: boolean }> = {
   disciplinary: { label: 'discipline', bad: true },
   unprofessional: { label: 'conduct', bad: true },
@@ -61,6 +89,7 @@ export function DashboardPage(): ReactNode {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [insights, setInsights] = useState<Insight[]>([]);
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [liveData, setLiveData] = useState<LiveData | null>(null);
   const [runId, setRunId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -68,6 +97,16 @@ export function DashboardPage(): ReactNode {
       .get<{ feed: FeedItem[] }>('/api/news/feed?limit=8')
       .then((r) => setFeed(r.feed))
       .catch(() => setFeed([]));
+    // B3: live board + countdown, refreshed by the SSE data channel (X2)
+    const loadLive = (): void => {
+      void api.get<LiveData>('/api/live').then(setLiveData).catch(() => setLiveData(null));
+    };
+    loadLive();
+    const es = new EventSource('/api/live/stream');
+    es.onmessage = () => loadLive();
+    es.onerror = () => es.close();
+    const cleanupEs = (): void => es.close();
+    window.addEventListener('beforeunload', cleanupEs);
     void api
       .get<{ runId: number | null; players: MatrixPlayer[]; movement?: Record<string, number> }>('/api/players')
       .then((r) => {
@@ -80,6 +119,10 @@ export function DashboardPage(): ReactNode {
       .get<{ insights: Insight[] }>('/api/insights')
       .then((r) => setInsights(r.insights.slice(0, 3)))
       .catch(() => setInsights([]));
+    return () => {
+      cleanupEs();
+      window.removeEventListener('beforeunload', cleanupEs);
+    };
   }, []);
 
   if (!players) return <Loading />;
@@ -140,6 +183,55 @@ export function DashboardPage(): ReactNode {
                 <Link to="/run" className="btn-glass-dark" data-testid="dashboard-run-btn">▶ Run the engine</Link>
               </div>
             </div>
+
+            {liveData && (
+              <div className="stat-panel" data-testid="dashboard-live">
+                <h4>The gameweek clock</h4>
+                {liveData.nextDeadline && (
+                  <div className="stat-row">
+                    <span>{liveData.nextEventName ?? 'Next'} deadline</span>
+                    <Countdown to={liveData.nextDeadline} />
+                  </div>
+                )}
+                {liveData.fixtures.filter((f) => f.state === 'live').length > 0 ? (
+                  <>
+                    {liveData.fixtures.filter((f) => f.state === 'live').slice(0, 5).map((f) => (
+                      <div className="stat-row" key={f.fixture_uid}>
+                        <span>{f.home} {f.home_score ?? 0}–{f.away_score ?? 0} {f.away}</span>
+                        <b className="badge brass">LIVE</b>
+                      </div>
+                    ))}
+                    {liveData.board.slice(0, 5).map((b) => (
+                      <div className="stat-row" key={b.uid}>
+                        <span>{b.web_name} <span className="mono" style={{ fontSize: '.66rem', opacity: 0.7 }}>{b.club}</span></span>
+                        <b className="mono">{b.total_points + Math.max(0, b.projected_bonus - b.bonus)} pts{b.projected_bonus > b.bonus ? ` (+${b.projected_bonus - b.bonus}b)` : ''}</b>
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  liveData.event != null && <div className="stat-row"><span>No match in play</span><b>—</b></div>
+                )}
+                {(liveData.priceTicker.moves.length > 0 || liveData.priceTicker.predictions.length > 0) && (
+                  <div style={{ marginTop: 10 }} data-testid="price-ticker">
+                    <p className="kicker" style={{ color: '#B9C2D6' }}>Price ticker</p>
+                    {liveData.priceTicker.moves.slice(0, 4).map((m, i) => (
+                      <div className="stat-row" key={`m${i}`}>
+                        <span>{m.web_name}</span>
+                        <b className={m.new_cost > m.old_cost ? 'rc-up' : 'rc-down'}>
+                          £{(m.old_cost / 10).toFixed(1)} → £{(m.new_cost / 10).toFixed(1)}
+                        </b>
+                      </div>
+                    ))}
+                    {liveData.priceTicker.predictions.slice(0, 4).map((p, i) => (
+                      <div className="stat-row" key={`p${i}`}>
+                        <span>{p.web_name} <span className="mono" style={{ fontSize: '.64rem', opacity: 0.7 }}>tonight?</span></span>
+                        <b className={p.direction === 'rise' ? 'rc-up' : 'rc-down'}>{p.direction} {Math.round(Number(p.p) * 100)}%</b>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {insights.length > 0 && (
               <div className="matchup-feature" data-testid="dashboard-previews">

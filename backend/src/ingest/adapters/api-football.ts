@@ -420,3 +420,35 @@ export async function backfillApiFootballSeason(
   }
   return { matches, stored, injuries, note: already ? `season ${seasonLabel} fixtures already imported` : undefined };
 }
+
+/**
+ * B2 (v1.4.4): map the CURRENT season's API-Football fixture ids onto our
+ * fixtures (kickoff-window + team-pair matching — never by name), stored in
+ * fixtures.stats.af_id so the KO-window lineup/odds jobs can address them.
+ * Current-season fixtures are a paid scope on the free plan: the denial is
+ * learned once via guardedPull and this is never hammered.
+ */
+export async function mapApiFootballFixtures(db: Knex, season: number, fetchFn?: FetchFn): Promise<{ mapped: number }> {
+  const url = `${BASE}/fixtures?league=${EPL_LEAGUE_ID}&season=${season}`;
+  const snap = await fetchWithSnapshot(db, { provider: 'api_football', endpoint: 'fixtures-map', url, headers: headers(), paramsHash: `map-${season}`, fetchFn });
+  const { response } = assertOk(snap.body);
+  const teamMap = await apiFootballTeamMap(db);
+  let mapped = 0;
+  for (const raw of response) {
+    const parsed = SeasonFixtureSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const f = parsed.data;
+    const homeUid = teamMap.get(f.teams.home.id);
+    const awayUid = teamMap.get(f.teams.away.id);
+    if (!homeUid || !awayUid) continue;
+    const kickoff = new Date(f.fixture.date);
+    const updated = await db('fixtures')
+      .where({ home_team_uid: homeUid, away_team_uid: awayUid })
+      .whereNotNull('fpl_fixture_id')
+      .whereBetween('kickoff_utc', [new Date(kickoff.getTime() - 36e5), new Date(kickoff.getTime() + 36e5)])
+      .update({ stats: db.raw(`stats || ?::jsonb`, [JSON.stringify({ af_id: f.fixture.id })]) });
+    mapped += updated;
+  }
+  await logPull(db, { provider: 'api_football', capability: 'fixtures', endpoint: 'fixtures-map', records: mapped, latencyMs: snap.latencyMs, status: 'ok' });
+  return { mapped };
+}

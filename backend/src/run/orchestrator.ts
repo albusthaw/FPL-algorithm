@@ -102,8 +102,14 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
   };
   const asOf = new Date();
 
+  // B2 (v1.4.4): the mini_lineup fast path re-ranks on fresh team sheets —
+  // no news pull, no indexing, no FPL re-sync, no history backfill. It goes
+  // straight to stats → match → finalize (and never touches AI: ai is null
+  // by construction for scheduled kinds).
+  const fastPath = opts.kind === 'mini_lineup';
+
   // 1. NEWS PULL — ≤2 enabled providers via capability routing (skippable)
-  await timed('news_pull', 5, async () => {
+  if (!fastPath) await timed('news_pull', 5, async () => {
     // C1 (v1.4.3): the keyless RSS anchor pulls on every run — zero credits,
     // conditional GETs make repeats near-free; failures never block the run
     try {
@@ -141,7 +147,7 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
 
   // 1b. NEWS INDEX — systematic entity linking + signal classification +
   // story clustering over everything pulled (statistical, no AI)
-  await timed('news_index', 8, async () => {
+  if (!fastPath) await timed('news_index', 8, async () => {
     try {
       const { indexNews } = await import('../news/indexer.js');
       const r = await indexNews(db);
@@ -154,12 +160,20 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
   });
 
   // 2. INGEST — refresh the FPL anchor (never fatal if the last sync is fresh)
-  await timed('ingest', 15, async () => {
+  if (!fastPath) await timed('ingest', 15, async () => {
     try {
       await syncFplBootstrap(db);
       await syncFplFixtures(db);
     } catch (err) {
       degradations.push(`FPL sync degraded (${String(err).slice(0, 120)}) — using last snapshot`);
+    }
+    // A3 (v1.4.4): reconcile availability from FPL flags + injuries + news
+    // hints so L3 minutes read one merged truth
+    try {
+      const { writeAvailabilityState } = await import('../stats/availability.js');
+      await writeAvailabilityState(db);
+    } catch (err) {
+      degradations.push(`availability reconciliation failed (${String(err).slice(0, 100)}) — minutes use raw flags`);
     }
     // historical depth (v1.4.0): bring the DB up to the configured ⚙
     // history_depth — the previous-season floor on a fresh install (the old

@@ -16,6 +16,7 @@ import {
 import { deMargin1x2, solveMarketLambdas, blendLambdas } from './l2-odds.js';
 import { computePlayerFeatures, computePositionPriors, type MatchRow, type PlayerFeatures } from './l0-features.js';
 import { predictMinutes, type MinutesConfig } from './l3-minutes.js';
+import { thresholdFor, type PriceModelConfig } from './prices.js';
 import { composeXpts, type ScoringRules, type BonusProfiles, type XptsBreakdown } from './l9-composer.js';
 import { log } from '../core/logger.js';
 
@@ -56,6 +57,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     suspension_tightrope: { yellows: number; haircut_next3: number; haircut_next6: number };
     news_signals?: import('../news/signals.js').NewsSignalsConfig;
   }>(db, 'human_factors').catch(() => null);
+  const priceModel = await getConfig<PriceModelConfig>(db, 'price_model').catch(() => null);
   const configVersion = await getConfigVersion(db, 'stat_score_weights');
 
   // ── events: the next 8 upcoming events as-of now
@@ -328,6 +330,18 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     lineupByFixtureTeam.set(`${l.fixture_uid}|${l.team_uid}`, { starters: l.starters ?? [], bench: l.bench ?? [] });
   }
 
+  // A3 (v1.4.4): reconciled availability per (player, fixture) — the merged
+  // FPL-flags + injuries + news truth caps the chance the minutes model sees
+  const availRows = (await db('availability_state')
+    .whereIn('fixture_uid', upcoming.map((f) => f.fixtureUid))
+    .select('player_uid', 'fixture_uid', 'p_available', 'state')) as {
+    player_uid: string;
+    fixture_uid: string;
+    p_available: string;
+    state: string;
+  }[];
+  const availBy = new Map(availRows.map((r) => [`${r.player_uid}|${r.fixture_uid}`, r]));
+
   // congestion: per team, fixture density
   const fixturesByTeam = new Map<string, UpcomingFixture[]>();
   for (const f of upcoming) {
@@ -440,10 +454,13 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           Math.abs(other.kickoff.getTime() - f.kickoff.getTime()) < 4 * 86_400_000,
       );
 
+      // A3: the reconciled availability row (if any) caps the FPL chance flag
+      const avail = availBy.get(`${p.uid}|${f.fixtureUid}`);
+      const availCap = avail ? Math.round(Number(avail.p_available) * 100) : null;
       const minutes = predictMinutes(
         {
           status: p.status,
-          chanceNext: p.chance_next,
+          chanceNext: availCap != null ? Math.min(p.chance_next ?? 100, availCap) : p.chance_next,
           activeInjury: injury,
           confirmedLineup,
           position: p.position,
@@ -643,7 +660,13 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     const zFdr = z((s) => s.fdrN3 ?? 5);
     // X5 crowd wisdom: ten million managers moving toward a player is
     // information — bounded (⚙ w7) so it can never dominate the model
-    const zMomentum = z((s) => Math.sign(s.transfersNet) * Math.log1p(Math.abs(s.transfersNet)));
+    // A2/S9 (v1.4.4): momentum scaled by the price model's OWNERSHIP-AWARE
+    // threshold — 100k net on a 40%-owned player is routine, on a 2% punt it
+    // is a stampede; the raw within-GW counter treated them the same
+    const zMomentum = z((s) => {
+      const theta = priceModel ? thresholdFor(priceModel, s.selectedBy) : 100_000;
+      return Math.sign(s.transfersNet) * Math.min(2, Math.abs(s.transfersNet) / Math.max(1, theta));
+    });
     const w7 = humanCfg?.ownership_momentum_weight ?? 0;
     // A6 (v1.4.3, audit S5): ICT was ingested every 6 h and read by nothing —
     // a small ⚙ w8 z-term folds FPL's own influence/creativity/threat index
