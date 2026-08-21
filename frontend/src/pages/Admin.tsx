@@ -532,6 +532,127 @@ interface CoverageRow {
   identities: number; set_piece: boolean; in_latest_run: boolean;
 }
 
+interface HistoryData {
+  depth: { mode: 'days' | 'seasons'; days: number; seasons: number; career_aggregates: boolean; max_seasons: number };
+  coverage: { provider: string; granularity: string; allowed: string; configured: string; imported: string }[];
+  ledger: { id: number; provider: string; scope: string; status: string; records: number; detail: string | null; finished_at: string | null }[];
+}
+
+function HistoryDepthPanel(): ReactNode {
+  const [data, setData] = useState<HistoryData | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState('');
+
+  const load = (): void => {
+    void api.get<HistoryData>('/api/admin/history').then(setData);
+  };
+  useEffect(load, []);
+
+  if (!data) return <Loading />;
+  const d = data.depth;
+
+  const save = async (next: HistoryData['depth']): Promise<void> => {
+    setSaving(true);
+    try {
+      await api.put('/api/admin/config/history_depth', { value: next });
+      setNote('saved — the next Run (or Backfill now) pulls to this depth');
+      load();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const backfill = async (): Promise<void> => {
+    setSaving(true);
+    try {
+      await api.post('/api/admin/backfill', {});
+      setNote('backfill started — progress appears in the ledger below');
+      setTimeout(load, 2500);
+    } catch (err) {
+      setNote(String((err as Error).message ?? err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="stack" data-testid="history-depth">
+      <div className="kicker">Past-data depth</div>
+      <div className="stat-panel">
+        <h4>How far back each source can go</h4>
+        <div className="table-wrap">
+          <table data-testid="history-coverage-table">
+            <thead><tr><th>Source</th><th>Granularity</th><th>Available depth</th><th>Configured</th><th>Imported</th></tr></thead>
+            <tbody>
+              {data.coverage.map((c) => (
+                <tr key={c.provider}>
+                  <td className="mono">{c.provider}</td>
+                  <td>{c.granularity}</td>
+                  <td>{c.allowed}</td>
+                  <td>{c.configured}</td>
+                  <td>{c.imported}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <label className="chip-paper">
+          depth&nbsp;
+          <select
+            value={d.mode === 'days' ? 'days' : String(Math.min(d.seasons, d.max_seasons))}
+            disabled={saving}
+            onChange={(e) => {
+              const v = e.target.value;
+              void save(v === 'days' ? { ...d, mode: 'days' } : { ...d, mode: 'seasons', seasons: Number(v) });
+            }}
+            data-testid="history-depth-select"
+          >
+            <option value="days">last {d.days} days (default)</option>
+            <option value="1">last season (per-GW)</option>
+            <option value="2">last 2 seasons</option>
+            <option value="5">last 5 seasons</option>
+            <option value="10">last 10 seasons (max per-GW)</option>
+          </select>
+        </label>
+        <label className="chip-paper" style={{ cursor: 'pointer', whiteSpace: 'normal', maxWidth: '100%' }}>
+          <input
+            type="checkbox"
+            checked={d.career_aggregates}
+            disabled={saving}
+            onChange={(e) => void save({ ...d, career_aggregates: e.target.checked })}
+            style={{ marginRight: 8, accentColor: 'var(--brick)' }}
+          />
+          career season totals (up to ~20 years)
+        </label>
+        <button className="btn-glass" onClick={() => void backfill()} disabled={saving} data-testid="backfill-now">
+          Backfill now
+        </button>
+        {note && <span className="muted">{note}</span>}
+      </div>
+      {data.ledger.length > 0 && (
+        <div className="table-wrap">
+          <table data-testid="history-ledger-table">
+            <thead><tr><th>Source</th><th>Scope</th><th>Status</th><th>Rows</th><th>Detail</th></tr></thead>
+            <tbody>
+              {data.ledger.map((l) => (
+                <tr key={l.id}>
+                  <td className="mono">{l.provider}</td>
+                  <td className="mono">{l.scope}</td>
+                  <td>{l.status === 'complete' ? <span className="badge ok">complete</span> : l.status === 'failed' ? <span className="badge bad">failed</span> : <span className="muted">{l.status}</span>}</td>
+                  <td className="mono">{l.records.toLocaleString()}</td>
+                  <td className="muted">{l.detail ?? ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CoverageTab(): ReactNode {
   const [data, setData] = useState<{ summary: { runId: number | null; totalActive: number; inLatestRun: number; withHistory: number; withNews7d: number; withSetPiece: number; zeroHistory: number }; players: CoverageRow[] } | null>(null);
   const [gapsOnly, setGapsOnly] = useState(false);
@@ -556,6 +677,7 @@ function CoverageTab(): ReactNode {
         <div className="stat-row"><span>With set-piece duty data</span><b>{summary.withSetPiece}</b></div>
         <div className="stat-row"><span>No history yet (season-start estimates)</span><b>{summary.zeroHistory}</b></div>
       </div>
+      <HistoryDepthPanel />
       <label className="chip-paper" style={{ cursor: 'pointer', alignSelf: 'flex-start' }}>
         <input type="checkbox" checked={gapsOnly} onChange={(e) => setGapsOnly(e.target.checked)} style={{ marginRight: 8, accentColor: 'var(--brick)' }} />
         show gaps only

@@ -25,6 +25,29 @@ export function normaliseName(name: string): string {
     .join(' ');
 }
 
+/**
+ * Order-PRESERVING text normalisation for substring/phrase matching (news
+ * entity linking). normaliseName sorts tokens — right for canonical name
+ * identity, fatal for "does this sentence contain this name": a multi-word
+ * alias would only ever match when the name happened to be alphabetical.
+ */
+export function normaliseText(text: string): string {
+  return text
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[øØ]/g, 'o')
+    .replace(/[đĐ]/g, 'd')
+    .replace(/[łŁ]/g, 'l')
+    .replace(/[æÆ]/g, 'ae')
+    .replace(/[ßẞ]/g, 'ss')
+    .toLowerCase()
+    .replace(/['’ʼ`]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ');
+}
+
 /** Trigram similarity between two normalised names (0..1). */
 export function trigramSimilarity(a: string, b: string): number {
   const grams = (s: string): Set<string> => {

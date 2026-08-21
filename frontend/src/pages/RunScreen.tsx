@@ -38,7 +38,8 @@ interface Progress {
 
 const STAGE_LABELS: Record<string, string> = {
   news_pull: '1 · Pulling news & injuries',
-  ingest: '2 · Refreshing FPL data',
+  news_index: '1b · Indexing news (linking, signals, stories)',
+  ingest: '2 · Refreshing FPL data & history',
   stats: '3 · Statistical engine',
   match: '4 · Match engine',
   ai_pass: '5 · AI analysis',
@@ -47,6 +48,14 @@ const STAGE_LABELS: Record<string, string> = {
   complete: 'Complete',
   failed: 'Failed',
 };
+
+interface HistoryCoverageRow {
+  provider: string;
+  granularity: string;
+  allowed: string;
+  configured: string;
+  imported: string;
+}
 
 export function RunScreen(): ReactNode {
   const { user, refresh } = useAuth();
@@ -58,6 +67,8 @@ export function RunScreen(): ReactNode {
   const [error, setError] = useState('');
   const [skipAi, setSkipAi] = useState(false);
   const [newsInfo, setNewsInfo] = useState<{ providerEnabled: boolean; recentCount: number }>({ providerEnabled: true, recentCount: 0 });
+  const [historyCoverage, setHistoryCoverage] = useState<HistoryCoverageRow[]>([]);
+  const [showCoverage, setShowCoverage] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -68,11 +79,13 @@ export function RunScreen(): ReactNode {
         aiProvider: { key: string } | null;
         newsProviderEnabled?: boolean;
         recentNewsCount?: number;
+        historyCoverage?: HistoryCoverageRow[];
       }>('/api/runs/prepare')
       .then((r) => {
         setCandidates(r.candidates);
         setAiProvider(r.aiProvider);
         setNewsInfo({ providerEnabled: r.newsProviderEnabled ?? false, recentCount: r.recentNewsCount ?? 0 });
+        setHistoryCoverage(r.historyCoverage ?? []);
         const pre = new Set<string>([...r.savedExclusions, ...r.candidates.filter((c) => c.preChecked).map((c) => c.uid)]);
         setExcluded(pre);
       });
@@ -168,6 +181,35 @@ export function RunScreen(): ReactNode {
                       ? 'Nobody to analyse yet: no news has arrived in the last 7 days. The news pull at the start of this run may bring some in.'
                       : 'Nobody to analyse: every player is either on the skip list or has no new news since their last analysis.'}
                 </p>
+              )}
+              {historyCoverage.length > 0 && (
+                <div style={{ marginTop: 14 }} data-testid="run-data-window">
+                  <button
+                    className="chip-glass"
+                    style={{ cursor: 'pointer', whiteSpace: 'normal', textAlign: 'left', maxWidth: '100%' }}
+                    onClick={() => setShowCoverage((s) => !s)}
+                    data-testid="run-data-window-toggle"
+                  >
+                    {showCoverage ? '▾' : '▸'} Data window
+                  </button>
+                  {showCoverage && (
+                    <div className="table-wrap" style={{ marginTop: 10 }}>
+                      <table>
+                        <thead><tr><th>Source</th><th>Available depth</th><th>Configured</th><th>Imported</th></tr></thead>
+                        <tbody>
+                          {historyCoverage.map((c) => (
+                            <tr key={c.provider}>
+                              <td className="mono">{c.provider}</td>
+                              <td>{c.allowed}</td>
+                              <td>{c.configured}</td>
+                              <td>{c.imported}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
               )}
               <div style={{ marginTop: 18 }} className="row">
                 <button className="btn-glass-dark" onClick={() => void launch()} disabled={running} data-testid="run-launch">

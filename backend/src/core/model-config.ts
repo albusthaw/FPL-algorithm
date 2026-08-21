@@ -126,6 +126,41 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
   human_factors: {
     ownership_momentum_weight: 0.04, // w7 in stat_score
     suspension_tightrope: { yellows: 4, haircut_next3: 0.96, haircut_next6: 0.93 },
+    // v1.4.0: news-driven signals (emotion, discipline, unprofessionalism,
+    // transfer/contract noise, personal events, managerial churn) — keyword
+    // classified in the news indexer, applied as bounded multipliers here.
+    news_signals: {
+      window_days: 10,
+      clamp: [0.9, 1.03],
+      corroboration: { require_tier: 2, min_items: 2 },
+      categories: {
+        disciplinary: { n1: 0.96, n3: 0.97, n6: 0.98 },
+        unprofessional: { n1: 0.96, n3: 0.97, n6: 0.98 },
+        transfer_talk: { n1: 0.98, n3: 0.975, n6: 0.97 },
+        contract_dispute: { n1: 0.99, n3: 0.985, n6: 0.98 },
+        personal_event: { n1: 0.96, n3: 0.98, n6: 0.99 },
+        morale_boost: { n1: 1.02, n3: 1.015, n6: 1.01 },
+        managerial_change: { n1: 0.98, n3: 0.99, n6: 1.0 },
+      },
+    },
+  },
+  // v1.4.0 news pull throughput (free-tier credit budgeting + pagination)
+  news_pull: {
+    poll_clubs: 5,
+    run_pages_per_club: 2,
+    poll_pages_per_club: 1,
+    credit_budget_run: 45,
+    credit_budget_poll: 6,
+  },
+  // v1.4.0 historical depth: default = live pulls only (last 7 days) with the
+  // previous-season floor; admins raise it up to 10 per-GW seasons (vaastav)
+  // and ~20 years of per-season career aggregates (FPL history_past)
+  history_depth: {
+    mode: 'days',
+    days: 7,
+    seasons: 1,
+    career_aggregates: false,
+    max_seasons: 10,
   },
   // L5 DEFCON
   defcon: { window_matches: 15, mult_range: [0.8, 1.25] },
