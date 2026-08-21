@@ -28,6 +28,7 @@ export async function truncateAll(db: Knex): Promise<void> {
       ai_calls, ai_verdict_cache, ai_exclusions,
       user_teams, user_team_players, team_uploads,
       match_insights, target_lists, coverage_reports, chip_recommendations,
+      history_pulls, key_audit,
       api_providers, ai_providers
     RESTART IDENTITY CASCADE`);
 }

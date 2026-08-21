@@ -4,7 +4,17 @@ import { api, ApiError, fmtPrice, n, type MatrixPlayer } from '../api';
 import { Loading } from '../components/Layout';
 import { PitchView, type PitchPlayer } from '../components/PitchView';
 
-interface TeamRow { id: number; name: string; bank: number; free_transfers: number; playerCount: number; updated_at: string }
+interface TeamRow { id: number; name: string; bank: number; free_transfers: number; playerCount: number; updated_at: string; kind?: string; source_run_id?: number | null }
+
+// P2 (v1.4.2): kind badges — what produced each saved squad
+const KIND_LABEL: Record<string, { label: string; cls: string }> = {
+  manual: { label: 'manual', cls: '' },
+  imported: { label: 'imported', cls: '' },
+  initial_xi: { label: 'Initial XI', cls: 'brass' },
+  freehit: { label: 'Free Hit build', cls: 'brass' },
+  wildcard: { label: 'Wildcard build', cls: 'brass' },
+  weekly: { label: 'Weekly XI', cls: 'brass' },
+};
 interface TeamPlayerRow { player_uid: string; slot: number; is_captain: boolean; is_vice: boolean; bench_position: number | null; web_name: string; position: string; price: number; club: string; status: string }
 interface TeamDetail { team: TeamRow & { players: TeamPlayerRow[]; notes: string; chips_used: { chip: string; set: number }[] }; valuation: { score: number; pointsPotential: number; benchStrength: number; captaincyQuality: number; budgetEfficiency: number } | null }
 
@@ -52,7 +62,11 @@ export function TeamsPage(): ReactNode {
                 <span className={`badge ${t.playerCount === 15 ? 'ok' : 'brass'}`}>{t.playerCount}/15</span>
               </div>
               <p className="mono muted" style={{ fontSize: '.76rem', marginTop: 8 }}>
-                bank {fmtPrice(t.bank)} · FT {t.free_transfers} · updated {new Date(t.updated_at).toLocaleDateString()}
+                <span className={`badge ${KIND_LABEL[t.kind ?? 'manual']?.cls ?? ''}`} data-testid={`team-kind-${t.id}`}>
+                  {KIND_LABEL[t.kind ?? 'manual']?.label ?? t.kind}
+                </span>
+                {t.source_run_id != null && <span className="badge" style={{ marginLeft: 6 }}>run {t.source_run_id}</span>}
+                {' '}· bank {fmtPrice(t.bank)} · FT {t.free_transfers} · updated {new Date(t.updated_at).toLocaleDateString()}
               </p>
             </Link>
           ))}

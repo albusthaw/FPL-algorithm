@@ -48,6 +48,35 @@ function toPitch(squad: Card[], xi: XiPayload, horizon: 1 | 3 | 6): { starters: 
   };
 }
 
+// P2 (v1.4.2): every generated build is savable as a team (kind + source run)
+function SaveBuildButton({ name, kind, sourceRunId, xi }: { name: string; kind: string; sourceRunId: number | null; xi: XiPayload }): ReactNode {
+  const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+  const save = async (): Promise<void> => {
+    setState('saving');
+    try {
+      const players = [
+        ...xi.starters.map((uid, i) => ({ uid, slot: i + 1, isCaptain: uid === xi.captain, isVice: uid === xi.vice, benchPosition: null })),
+        ...xi.bench.map((uid, i) => ({ uid, slot: 12 + i, isCaptain: false, isVice: false, benchPosition: i + 1 })),
+      ];
+      await api.post('/api/teams', { name, kind, sourceRunId, players });
+      setState('saved');
+    } catch (err) {
+      setMsg(err instanceof ApiError ? err.message : String(err));
+      setState('error');
+    }
+  };
+  if (state === 'saved') return <span className="badge ok" data-testid={`saved-${kind}`}>Saved ✓ — see Your Teams</span>;
+  return (
+    <span className="row" style={{ gap: 8 }}>
+      <button className="btn-glass" data-testid={`save-${kind}`} onClick={() => void save()} disabled={state === 'saving'}>
+        {state === 'saving' ? 'Saving…' : 'Save as team'}
+      </button>
+      {state === 'error' && <span className="badge bad">{msg}</span>}
+    </span>
+  );
+}
+
 function DiffView({ diff }: { diff: { out: Card[]; in: Card[]; deltaXpts?: number; deltaBudget?: number } }): ReactNode {
   return (
     <div className="matchup-feature" style={{ marginTop: 18 }}>
@@ -84,7 +113,7 @@ export function InitialModePage(): ReactNode {
   const [banned, setBanned] = useState<string[]>([]);
   const [compareTeamId, setCompareTeamId] = useState<number | null>(null);
   const [teams, setTeams] = useState<{ id: number; name: string }[]>([]);
-  const [result, setResult] = useState<{ squad: Card[]; xi: XiPayload; totalCost: number; method: string; diff: { out: Card[]; in: Card[]; deltaXpts: number; deltaBudget: number } | null } | null>(null);
+  const [result, setResult] = useState<{ runId: number; squad: Card[]; xi: XiPayload; totalCost: number; method: string; diff: { out: Card[]; in: Card[]; deltaXpts: number; deltaBudget: number } | null } | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [pickerSearch, setPickerSearch] = useState('');
@@ -174,6 +203,9 @@ export function InitialModePage(): ReactNode {
           <div className="grid-2" style={{ alignItems: 'start' }}>
             <div>
               <PitchView {...toPitch(result.squad, result.xi, horizon)} />
+              <div className="row" style={{ marginTop: 12 }}>
+                <SaveBuildButton name={`Initial XI (run ${result.runId})`} kind="initial_xi" sourceRunId={result.runId} xi={result.xi} />
+              </div>
               {result.diff && <DiffView diff={result.diff} />}
             </div>
             <div className="stat-panel">
@@ -200,7 +232,7 @@ const CHIP_LABEL: Record<string, string> = { freehit: 'Free Hit', wildcard: 'Wil
 export function ChipsModePage(): ReactNode {
   const [teams, setTeams] = useState<{ id: number; name: string; playerCount: number }[]>([]);
   const [teamId, setTeamId] = useState<number | null>(null);
-  const [data, setData] = useState<{ recommendations: ChipRec[]; coverage: { coverage_score: string; gaps: { event: number; kind: string; leverage: number }[] } | null; gwFixtureCounts: { event: number; fixtures: number }[]; chipSquad: { chip: string; event: number; squad: Card[]; xi: XiPayload; budget: number; totalCost: number; diff: { out: Card[]; in: Card[] } } | null } | null>(null);
+  const [data, setData] = useState<{ runId: number; recommendations: ChipRec[]; coverage: { coverage_score: string; gaps: { event: number; kind: string; leverage: number }[] } | null; gwFixtureCounts: { event: number; fixtures: number }[]; chipSquad: { chip: string; event: number; squad: Card[]; xi: XiPayload; budget: number; totalCost: number; diff: { out: Card[]; in: Card[] } } | null } | null>(null);
   const [error, setError] = useState('');
   const [chosen, setChosen] = useState<{ chip: 'freehit' | 'wildcard'; event: number } | null>(null);
 
@@ -290,7 +322,17 @@ export function ChipsModePage(): ReactNode {
               <div style={{ marginTop: 26 }}>
                 <p className="kicker">{CHIP_LABEL[data.chipSquad.chip]} squad for GW{data.chipSquad.event} (budget {fmtPrice(data.chipSquad.budget)})</p>
                 <div className="grid-2" style={{ alignItems: 'start' }}>
-                  <PitchView {...toPitch(data.chipSquad.squad, data.chipSquad.xi, data.chipSquad.chip === 'freehit' ? 1 : 6)} />
+                  <div>
+                    <PitchView {...toPitch(data.chipSquad.squad, data.chipSquad.xi, data.chipSquad.chip === 'freehit' ? 1 : 6)} />
+                    <div className="row" style={{ marginTop: 12 }}>
+                      <SaveBuildButton
+                        name={`${CHIP_LABEL[data.chipSquad.chip]} GW${data.chipSquad.event} (run ${data.runId})`}
+                        kind={data.chipSquad.chip}
+                        sourceRunId={data.runId}
+                        xi={data.chipSquad.xi}
+                      />
+                    </div>
+                  </div>
                   <DiffView diff={data.chipSquad.diff} />
                 </div>
               </div>
@@ -308,8 +350,10 @@ interface Move { out: string[]; in: string[]; deltaXpts: number; hitCost: number
 export function WeeklyModePage(): ReactNode {
   const [teams, setTeams] = useState<{ id: number; name: string; playerCount: number; free_transfers: number; bank: number }[]>([]);
   const [teamId, setTeamId] = useState<number | null>(null);
-  const [data, setData] = useState<{ best0: { reasons: { captain?: string; formation?: string } }; singles: Move[]; doubles: Move[]; hitAdvice: string; alerts: { web_name: string; injury_status: string; injury_detail: string }[]; priceRisk: { web_name: string; transfers_in_net: number }[]; captaincy: { web_name: string; score: string; reasons: { doubled_xpts?: number; label?: string } }[]; targets: { web_name: string; position: string; club: string; score: string }[] } | null>(null);
+  const [data, setData] = useState<{ runId: number; xi: XiPayload; squad: Card[]; applied: { out: string[]; in: string[]; xi: XiPayload; squad: Card[] } | null; best0: { reasons: { captain?: string; formation?: string } }; singles: Move[]; doubles: Move[]; hitAdvice: string; alerts: { web_name: string; injury_status: string; injury_detail: string }[]; priceRisk: { web_name: string; transfers_in_net: number }[]; captaincy: { web_name: string; score: string; reasons: { doubled_xpts?: number; ceiling?: number; label?: string } }[]; targets: { web_name: string; position: string; club: string; score: string }[] } | null>(null);
   const [error, setError] = useState('');
+  // P2 (v1.4.2): preview the XI after a suggested move is applied
+  const [apply, setApply] = useState<{ out: string[]; in: string[] } | null>(null);
 
   useEffect(() => {
     void api.get<{ teams: typeof teams }>('/api/teams').then((r) => {
@@ -320,16 +364,21 @@ export function WeeklyModePage(): ReactNode {
   }, []);
 
   useEffect(() => {
-    if (!teamId) return;
-    setError('');
-    setData(null);
-    void api
-      .post<typeof data>('/api/modes/weekly', { teamId, horizon: 3 })
-      .then(setData)
-      .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
+    setApply(null);
   }, [teamId]);
 
+  useEffect(() => {
+    if (!teamId) return;
+    setError('');
+    void api
+      .post<typeof data>('/api/modes/weekly', { teamId, horizon: 3, apply })
+      .then(setData)
+      .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
+  }, [teamId, apply]);
+
   const team = teams.find((t) => t.id === teamId);
+  const shownXi = data?.applied?.xi ?? data?.xi ?? null;
+  const shownSquad = data?.applied?.squad ?? data?.squad ?? [];
 
   return (
     <div className="container">
@@ -351,6 +400,26 @@ export function WeeklyModePage(): ReactNode {
         {data && (
           <div className="grid-2" style={{ alignItems: 'start' }}>
             <div className="stack">
+              {shownXi && (
+                <div data-testid="weekly-pitch">
+                  <p className="kicker">
+                    {data.applied ? 'Your best XI — after the previewed transfer' : 'Your best XI this week'}
+                    <span className="mono muted" style={{ marginLeft: 8, fontSize: '.7rem' }}>{shownXi.xpts} xPts (C doubled)</span>
+                  </p>
+                  <PitchView {...toPitch(shownSquad, shownXi, 3)} />
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <SaveBuildButton
+                      name={`Weekly XI${data.applied ? ' (post-transfer)' : ''} (run ${data.runId})`}
+                      kind="weekly"
+                      sourceRunId={data.runId}
+                      xi={shownXi}
+                    />
+                    {data.applied && (
+                      <button className="chip-paper" onClick={() => setApply(null)}>reset preview</button>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="card">
                 <p className="kicker">Best 0-transfer move</p>
                 <p>Captain <b className="serif">{data.captaincy[0]?.web_name ?? '—'}</b>, formation {data.best0.reasons.formation ?? '—'}. Bank the transfer if nothing below clears +1.5 xPts.</p>
@@ -365,7 +434,10 @@ export function WeeklyModePage(): ReactNode {
                       <b className="rc-up">{m.inCards.map((c) => c.web_name).join(', ')}</b>
                       {m.inCards[0]?.ai_rationale && <span className="muted" style={{ fontSize: '.8rem' }}> — “{m.inCards[0].ai_rationale}”</span>}
                     </span>
-                    <span className="mono" style={{ whiteSpace: 'nowrap' }}>+{m.netGain.toFixed(2)} xP</span>
+                    <span className="row" style={{ gap: 6, whiteSpace: 'nowrap' }}>
+                      <span className="mono">+{m.netGain.toFixed(2)} xP</span>
+                      <button className="chip-paper" onClick={() => setApply({ out: m.out, in: m.in })}>preview XI</button>
+                    </span>
                   </div>
                 ))}
                 {data.doubles.length > 0 && (
@@ -389,10 +461,11 @@ export function WeeklyModePage(): ReactNode {
 
             <div className="stack">
               <div className="stat-panel">
-                <h4>Captaincy pool</h4>
+                {/* B5 (v1.4.2): the displayed number IS the simulated P90 ceiling */}
+                <h4>Captaincy pool (P90 ceiling)</h4>
                 {data.captaincy.map((c, i) => (
                   <div className="stat-row" key={i}>
-                    <span>{c.web_name} {c.reasons.label === 'ceiling_pick' && '· ceiling'}</span>
+                    <span>{c.web_name}{c.reasons.doubled_xpts != null && <span className="mono" style={{ opacity: 0.7, fontSize: '.72rem' }}> · mean {c.reasons.doubled_xpts}</span>}</span>
                     <b>{n(c.score)}</b>
                   </div>
                 ))}

@@ -5,6 +5,7 @@ import { requireAdmin } from './auth.js';
 import { hashPassword } from '../auth/auth.js';
 import { applyTokens } from '../tokens/ledger.js';
 import { setProviderEnabled, MaxProvidersError } from '../ingest/gateway.js';
+import { PROVIDER_PLAN_TIERS, DEFAULT_PROVIDER_PLANS, tierFor, quotaLimitFor, type ProviderPlansConfig } from '../ingest/plans.js';
 import { setAliveProvider, buildAdapter } from '../ai/gateway.js';
 import { getConfig, setConfig } from '../core/model-config.js';
 import { setEnabled as setFeatureEnabled } from '../core/kernel.js';
@@ -132,6 +133,8 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
   app.get('/api/admin/providers', async (req) => {
     requireAdmin(req);
     const providers = await db('api_providers').orderBy('key');
+    // P1 (v1.4.2): subscription model — selected tier per provider + the menu
+    const plans = (await getConfig<ProviderPlansConfig>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
     // key STATUS + masked hint only — never key values (no secrets to the frontend)
     return {
       providers: providers.map((p) => ({
@@ -139,6 +142,8 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
         keyConfigured: keyConfigured(p.key),
         keyHint: keyHint(p.key),
         requiresKey: requiresKey(p.key),
+        plan: plans[p.key]?.plan ?? 'free',
+        planTiers: (PROVIDER_PLAN_TIERS[p.key] ?? []).map((t) => ({ id: t.id, label: t.label, cost: t.cost, note: t.note })),
         keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
           env: f.env,
           label: f.label,
@@ -172,6 +177,64 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
       return reply.code(400).send({ error: (err as Error).message });
     }
     return { ok: true };
+  });
+
+  // ── P1 (v1.4.2): subscription plan per provider. Writes the tier snapshot
+  //    into ⚙ provider_plans, fills api_providers.quota_limit from the tier
+  //    (fixes X5), and re-arms entitlement probes — learned denials for the
+  //    provider are cleared so each gated scope gets ONE fresh try under the
+  //    new plan (then re-learns, never hammers).
+  const PlanSchema = z.object({ plan: z.string().min(1).max(40) });
+
+  app.put('/api/admin/providers/:key/plan', async (req, reply) => {
+    requireAdmin(req);
+    const key = (req.params as { key: string }).key;
+    const parsed = PlanSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid plan payload' });
+    const tier = tierFor(key, parsed.data.plan);
+    if (!tier) return reply.code(422).send({ error: `unknown plan '${parsed.data.plan}' for provider '${key}'` });
+    const plans = (await getConfig<ProviderPlansConfig>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
+    const next = { ...plans, [key]: { plan: tier.id, depth: tier.depth, rate: tier.rate } };
+    await setConfig(db, 'provider_plans', next);
+    await db('api_providers').where({ key }).update({ quota_limit: quotaLimitFor(tier), updated_at: db.fn.now() });
+    const rearmed = await db('provider_entitlements').where({ provider: key, allowed: false }).del();
+    return { ok: true, plan: tier.id, quotaLimit: quotaLimitFor(tier), entitlementProbesRearmed: rearmed };
+  });
+
+  // ── P1 (v1.4.2): the Run screen's per-source depth selector (admin-gated).
+  //    Merges one selection into ⚙ history_depth.per_provider; the next
+  //    launch run backfills exactly what was selected (resumable ledger).
+  const DepthSchema = z.object({
+    provider: z.string().min(1).max(40),
+    unit: z.enum(['days', 'months', 'seasons', 'career']),
+    value: z.number().int().min(0).max(240),
+  });
+
+  app.put('/api/admin/history-depth', async (req, reply) => {
+    requireAdmin(req);
+    const parsed = DepthSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid depth payload' });
+    const { DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+    const depth = (await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => null)) ?? DEFAULT_HISTORY_DEPTH;
+    const next = {
+      ...DEFAULT_HISTORY_DEPTH,
+      ...depth,
+      per_provider: {
+        ...(depth.per_provider ?? {}),
+        [parsed.data.provider]: { unit: parsed.data.unit, value: parsed.data.value },
+      },
+    };
+    // vaastav/fpl selections also fold into the legacy fields so older
+    // readers (coverage text, admin tab) show the same truth
+    if (parsed.data.provider === 'vaastav' && parsed.data.unit === 'seasons') {
+      next.mode = parsed.data.value > 1 ? 'seasons' : 'days';
+      next.seasons = parsed.data.value;
+    }
+    if (parsed.data.provider === 'fpl' && parsed.data.unit === 'career') {
+      next.career_aggregates = parsed.data.value > 0;
+    }
+    await setConfig(db, 'history_depth', next);
+    return { ok: true, depth: next };
   });
 
   // ── API keys: entered here, stored server-side in shared/.env, applied
@@ -418,10 +481,11 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     if (backfillState.running) return reply.code(409).send({ error: 'a backfill is already running' });
     const { ensureHistoryDepth, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
     const depthCfg = (await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => null)) ?? DEFAULT_HISTORY_DEPTH;
+    const plans = (await getConfig<ProviderPlansConfig>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
     backfillState.running = true;
     // runs in the background of THIS admin action (human-triggered,
     // statistical ingestion only); progress lands in the history_pulls ledger
-    void ensureHistoryDepth(db, depthCfg)
+    void ensureHistoryDepth(db, depthCfg, { plans })
       .catch((err) => log.error({ err: String(err) }, 'backfill failed'))
       .finally(() => {
         backfillState.running = false;

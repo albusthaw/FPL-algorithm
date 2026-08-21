@@ -132,7 +132,8 @@ function UsersTab(): ReactNode {
 }
 
 interface KeyField { env: string; label: string; secret: boolean; set: boolean }
-interface ApiProvider { key: string; name: string; enabled: boolean; state: string; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; config: { anchor?: boolean }; quota_used: number; quota_limit: number | null }
+interface PlanTier { id: string; label: string; cost: string; note: string }
+interface ApiProvider { key: string; name: string; enabled: boolean; state: string; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; config: { anchor?: boolean }; quota_used: number; quota_limit: number | null; plan?: string; planTiers?: PlanTier[] }
 
 /** Enter/replace a provider's API key. The value is write-only: sent once,
  *  stored server-side, never shown again — only “set (…last4)”. */
@@ -222,6 +223,29 @@ function ProvidersTab(): ReactNode {
               key: {p.keyConfigured ? `✓ set${p.keyHint ? ` (${p.keyHint})` : ''}` : p.requiresKey ? '✗ required to enable' : 'not needed'}
               {' · '}quota {p.quota_used}{p.quota_limit ? `/${p.quota_limit}` : ''}
             </p>
+            {/* P1 (v1.4.2): subscription plan selector — fills quota_limit and
+                re-arms entitlement probes; depth options follow the plan */}
+            {(p.planTiers?.length ?? 0) > 0 && (
+              <label className="row" style={{ gap: 8, margin: '6px 0 10px' }}>
+                <span className="mono muted" style={{ fontSize: '.68rem' }}>PLAN</span>
+                <select
+                  className="input-paper"
+                  style={{ minWidth: 170, fontSize: '.8rem' }}
+                  value={p.plan ?? 'free'}
+                  data-testid={`provider-plan-${p.key}`}
+                  onChange={(e) => {
+                    void api
+                      .put(`/api/admin/providers/${p.key}/plan`, { plan: e.target.value })
+                      .then(load)
+                      .catch((err2) => setErr(err2 instanceof ApiError ? err2.message : String(err2)));
+                  }}
+                >
+                  {(p.planTiers ?? []).map((t) => (
+                    <option key={t.id} value={t.id} title={t.note}>{t.label} · {t.cost}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             {p.config?.anchor ? (
               <span className="badge brass">always on</span>
             ) : (

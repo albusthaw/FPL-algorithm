@@ -4,6 +4,7 @@
  * type-coercion rules; Understat ships DISABLED (feature kernel).
  */
 import { z } from 'zod';
+import { ulid } from 'ulid';
 import type { Knex } from 'knex';
 import { config } from '../../core/config.js';
 import { fetchWithSnapshot, logPull, type FetchFn } from '../http.js';
@@ -156,6 +157,104 @@ export async function pullFootballDataMatches(db: Knex, fetchFn?: FetchFn): Prom
   return { records, disagreements };
 }
 
+/** football-data.org team names ("Manchester City FC") → FPL registered names. */
+const FD_ALIASES: Record<string, string> = {
+  'manchester city': 'man city',
+  'manchester united': 'man utd',
+  'tottenham hotspur': 'spurs',
+  'nottingham forest': "nott'm forest",
+  'wolverhampton wanderers': 'wolves',
+  'west ham united': 'west ham',
+  'newcastle united': 'newcastle',
+  'leeds united': 'leeds',
+  'brighton & hove albion': 'brighton',
+  'brighton and hove albion': 'brighton',
+  'afc bournemouth': 'bournemouth',
+  'leicester city': 'leicester',
+  'luton town': 'luton',
+  'ipswich town': 'ipswich',
+  'sheffield united': 'sheffield utd',
+};
+
+const normClub = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/\b(afc|fc)\b/g, '')
+    .replace(/[^a-z'& ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * P1 (v1.4.2) backfill executor: one PAST season of PL results via
+ * ?season=YYYY — a paid-tier scope on football-data.org (the free tier's
+ * refusal is learned as PLAN_DENIED by guardedPull and never re-hammered).
+ * Stores finished matches as fixtures rows (no FPL ids for past seasons);
+ * skips a season the vaastav importer already covered.
+ */
+export async function backfillFootballDataSeason(
+  db: Knex,
+  startYear: number,
+  fetchFn?: FetchFn,
+): Promise<{ matches: number; stored: number; skippedTeams: number; note?: string }> {
+  if (!config.keys.footballData) throw new PullError('AUTH', 'FOOTBALL_DATA_TOKEN not configured');
+  const seasonLabel = `${startYear}/${String((startYear + 1) % 100).padStart(2, '0')}`;
+  const already = await db('fixtures').where('season', seasonLabel).first('fixture_uid');
+  if (already) return { matches: 0, stored: 0, skippedTeams: 0, note: `season ${seasonLabel} already imported (vaastav)` };
+
+  const snap = await fetchWithSnapshot(db, {
+    provider: 'football_data',
+    endpoint: 'pl-matches-season',
+    url: `https://api.football-data.org/v4/competitions/PL/matches?season=${startYear}`,
+    headers: { 'X-Auth-Token': config.keys.footballData },
+    paramsHash: `season-${startYear}`,
+    fetchFn,
+  });
+  const body = snap.body as { matches?: unknown[] } | null;
+  const matches = body?.matches ?? [];
+  const ourTeams = (await db('teams').select('uid', 'name')) as { uid: string; name: string }[];
+  const uidByNorm = new Map(ourTeams.map((t) => [normClub(t.name), t.uid]));
+  const resolveTeam = (name: string | null): string | null => {
+    if (!name) return null;
+    const n = normClub(name);
+    return uidByNorm.get(n) ?? uidByNorm.get(FD_ALIASES[n] ?? '') ?? null;
+  };
+
+  let stored = 0;
+  let skippedTeams = 0;
+  await db.transaction(async (trx) => {
+    for (const raw of matches) {
+      const parsed = FdMatchSchema.safeParse(raw);
+      if (!parsed.success) continue;
+      const m = parsed.data;
+      if (m.status !== 'FINISHED' || m.score.fullTime.home == null) continue;
+      const homeUid = resolveTeam(m.homeTeam.name);
+      const awayUid = resolveTeam(m.awayTeam.name);
+      if (!homeUid || !awayUid) {
+        skippedTeams++; // relegated club with no row of ours — never mint teams here
+        continue;
+      }
+      const dupe = await trx('fixtures').where({ season: seasonLabel, home_team_uid: homeUid, away_team_uid: awayUid }).first('fixture_uid');
+      if (dupe) continue;
+      await trx('fixtures').insert({
+        fixture_uid: `fx_${ulid()}`,
+        season: seasonLabel,
+        fpl_fixture_id: null,
+        event: m.matchday,
+        home_team_uid: homeUid,
+        away_team_uid: awayUid,
+        kickoff_utc: m.utcDate,
+        state: 'checked',
+        home_score: m.score.fullTime.home,
+        away_score: m.score.fullTime.away,
+        stats: JSON.stringify({ source: 'football_data', fd_id: m.id }),
+      });
+      stored++;
+    }
+  });
+  await logPull(db, { provider: 'football_data', capability: 'fixtures', endpoint: 'pl-matches-season', records: stored, latencyMs: snap.latencyMs, status: 'ok' });
+  return { matches: matches.length, stored, skippedTeams };
+}
+
 // ───────────────────────────────────────────────────────── TheSportsDB ──
 
 /**
@@ -270,7 +369,7 @@ const UnderstatPlayerSchema = z
   })
   .passthrough();
 
-export async function pullUnderstatLeague(db: Knex, startYear: number, fetchFn?: FetchFn): Promise<{ players: number; resolved: number }> {
+export async function pullUnderstatLeague(db: Knex, startYear: number, fetchFn?: FetchFn): Promise<{ players: number; resolved: number; seasonRows: number }> {
   // The league page stopped embedding playersData in 2026 (client-side
   // loading now) — the site's own ajax endpoint serves the same shape as
   // JSON. Fallback to the legacy script extraction if the endpoint drifts.
@@ -305,14 +404,38 @@ export async function pullUnderstatLeague(db: Knex, startYear: number, fetchFn?:
   const parsed = z.array(UnderstatPlayerSchema).safeParse(playersData);
   if (!parsed.success) throw new PullError('SCHEMA_DRIFT', 'understat playersData shape drifted', parsed.error.issues.slice(0, 5));
   let resolved = 0;
+  let seasonRows = 0;
+  const seasonLabel = `${startYear}/${String((startYear + 1) % 100).padStart(2, '0')}`;
   for (const p of parsed.data) {
     const outcome = await resolveIdentity(db, {
       provider: 'understat',
       providerId: p.id,
       name: p.player_name,
     });
-    if (outcome.kind === 'cached' || outcome.kind === 'code' || outcome.kind === 'exact') resolved++;
+    if (outcome.kind !== 'cached' && outcome.kind !== 'code' && outcome.kind !== 'exact') continue;
+    resolved++;
+    // P1 (v1.4.2): store the per-season xG aggregates. The (player_uid,
+    // season) row is SHARED with fpl_history_past — merge into stats.understat
+    // instead of clobbering the FPL career numbers.
+    const agg = JSON.stringify({
+      games: Number(p.games),
+      minutes: Number(p.time),
+      xg: Number(p.xG),
+      xa: Number(p.xA),
+      npxg: Number(p.npxG),
+      xg_chain: Number(p.xGChain),
+      xg_buildup: Number(p.xGBuildup),
+      team: p.team_title,
+    });
+    await db.raw(
+      `INSERT INTO player_season_history (player_uid, season, source, stats, as_of)
+       VALUES (?, ?, 'understat', jsonb_build_object('understat', ?::jsonb), now())
+       ON CONFLICT (player_uid, season)
+       DO UPDATE SET stats = player_season_history.stats || jsonb_build_object('understat', ?::jsonb), as_of = now()`,
+      [outcome.playerUid, seasonLabel, agg, agg],
+    );
+    seasonRows++;
   }
   await logPull(db, { provider: 'understat', capability: 'stats', endpoint: 'league', records: parsed.data.length, latencyMs: snap.latencyMs, status: 'ok' });
-  return { players: parsed.data.length, resolved };
+  return { players: parsed.data.length, resolved, seasonRows };
 }

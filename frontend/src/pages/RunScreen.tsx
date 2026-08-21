@@ -57,6 +57,10 @@ interface HistoryCoverageRow {
   imported: string;
 }
 
+// P1 (v1.4.2): per-source depth selector — options = plan ∩ entitlements
+interface DepthOption { unit: string; value: number; label: string; allowed: boolean; reason?: string }
+interface DepthSelector { provider: string; plan: string; planLabel: string; options: DepthOption[]; selected: { unit: string; value: number } | null }
+
 export function RunScreen(): ReactNode {
   const { user, refresh } = useAuth();
   const [candidates, setCandidates] = useState<Candidate[] | null>(null);
@@ -68,6 +72,9 @@ export function RunScreen(): ReactNode {
   const [skipAi, setSkipAi] = useState(false);
   const [newsInfo, setNewsInfo] = useState<{ providerEnabled: boolean; recentCount: number }>({ providerEnabled: true, recentCount: 0 });
   const [historyCoverage, setHistoryCoverage] = useState<HistoryCoverageRow[]>([]);
+  const [depthOptions, setDepthOptions] = useState<DepthSelector[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [depthNote, setDepthNote] = useState('');
   const [showCoverage, setShowCoverage] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
@@ -80,12 +87,16 @@ export function RunScreen(): ReactNode {
         newsProviderEnabled?: boolean;
         recentNewsCount?: number;
         historyCoverage?: HistoryCoverageRow[];
+        depthOptions?: DepthSelector[];
+        isAdmin?: boolean;
       }>('/api/runs/prepare')
       .then((r) => {
         setCandidates(r.candidates);
         setAiProvider(r.aiProvider);
         setNewsInfo({ providerEnabled: r.newsProviderEnabled ?? false, recentCount: r.recentNewsCount ?? 0 });
         setHistoryCoverage(r.historyCoverage ?? []);
+        setDepthOptions(r.depthOptions ?? []);
+        setIsAdmin(r.isAdmin ?? false);
         const pre = new Set<string>([...r.savedExclusions, ...r.candidates.filter((c) => c.preChecked).map((c) => c.uid)]);
         setExcluded(pre);
       });
@@ -195,18 +206,57 @@ export function RunScreen(): ReactNode {
                   {showCoverage && (
                     <div className="table-wrap" style={{ marginTop: 10 }}>
                       <table>
-                        <thead><tr><th>Source</th><th>Available depth</th><th>Configured</th><th>Imported</th></tr></thead>
+                        <thead><tr><th>Source</th><th>Available depth</th><th>Configured</th><th>Imported</th><th>Pull depth</th></tr></thead>
                         <tbody>
-                          {historyCoverage.map((c) => (
-                            <tr key={c.provider}>
-                              <td className="mono">{c.provider}</td>
-                              <td>{c.allowed}</td>
-                              <td>{c.configured}</td>
-                              <td>{c.imported}</td>
-                            </tr>
-                          ))}
+                          {historyCoverage.map((c) => {
+                            // P1 (v1.4.2): selector column — options = subscription
+                            // plan ∩ learned entitlements; refused options stay
+                            // visible (disabled) with the reason in the title
+                            const sel = depthOptions.find((d) => d.provider === c.provider);
+                            return (
+                              <tr key={c.provider}>
+                                <td className="mono">{c.provider}</td>
+                                <td>{c.allowed}</td>
+                                <td>{c.configured}</td>
+                                <td>{c.imported}</td>
+                                <td>
+                                  {sel && sel.options.length > 0 ? (
+                                    <select
+                                      className="input-paper"
+                                      style={{ minWidth: 150, fontSize: '.78rem' }}
+                                      data-testid={`depth-select-${c.provider}`}
+                                      disabled={!isAdmin}
+                                      title={isAdmin ? `plan: ${sel.planLabel}` : 'admins set the pull depth'}
+                                      value={sel.selected ? `${sel.selected.unit}:${sel.selected.value}` : ''}
+                                      onChange={(e) => {
+                                        const [unit, value] = e.target.value.split(':');
+                                        void api
+                                          .put('/api/admin/history-depth', { provider: c.provider, unit, value: Number(value) })
+                                          .then(() => setDepthNote(`${c.provider}: depth saved — the next launch run backfills it`))
+                                          .then(() =>
+                                            setDepthOptions((prev) =>
+                                              prev.map((d) => (d.provider === c.provider ? { ...d, selected: { unit: unit!, value: Number(value) } } : d)),
+                                            ),
+                                          )
+                                          .catch((err) => setDepthNote(err instanceof ApiError ? err.message : String(err)));
+                                      }}
+                                    >
+                                      {sel.options.map((o) => (
+                                        <option key={`${o.unit}:${o.value}`} value={`${o.unit}:${o.value}`} disabled={!o.allowed} title={o.reason ?? ''}>
+                                          {o.label}{!o.allowed ? ` — ${o.reason ?? 'unavailable'}` : ''}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : (
+                                    <span className="muted">—</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
+                      {depthNote && <p className="mono muted" style={{ fontSize: '.72rem', marginTop: 6 }} data-testid="depth-note">{depthNote}</p>}
                     </div>
                   )}
                 </div>

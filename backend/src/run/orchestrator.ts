@@ -158,8 +158,11 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
     try {
       const { getConfig } = await import('../core/model-config.js');
       const { ensureHistoryDepth, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+      const { DEFAULT_PROVIDER_PLANS } = await import('../ingest/plans.js');
       const depthCfg = await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => DEFAULT_HISTORY_DEPTH);
+      const plans = (await getConfig<typeof DEFAULT_PROVIDER_PLANS>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
       const notes = await ensureHistoryDepth(db, depthCfg ?? DEFAULT_HISTORY_DEPTH, {
+        plans,
         onProgress: (msg) => emit({ runId, stage: 'ingest', detail: msg, pct: 15 }),
       });
       degradations.push(...notes.filter((n) => n.includes('failed')));

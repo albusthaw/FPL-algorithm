@@ -1,5 +1,6 @@
 import type { Knex } from 'knex';
 import { DEFAULT_CAPABILITIES } from './ai-capabilities.js';
+import { DEFAULT_PROVIDER_PLANS } from '../ingest/plans.js';
 
 /**
  * Every constant marked ⚙ in fpl-engines-plan.md lives here as a versioned
@@ -162,7 +163,13 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     seasons: 1,
     career_aggregates: false,
     max_seasons: 10,
+    // v1.4.2 P1: per-source depth selections from the Run screen
+    // ({provider: {unit: days|months|seasons|career, value}})
+    per_provider: {},
   },
+  // v1.4.2 P1: selected subscription tier per provider (snapshot of the
+  // chosen PlanTier from ingest/plans.ts); admin plan selector writes here
+  provider_plans: DEFAULT_PROVIDER_PLANS,
   // L5 DEFCON
   defcon: { window_matches: 15, mult_range: [0.8, 1.25] },
   // L7 bonus v1 empirical profile table (expected bonus given event profile)

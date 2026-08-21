@@ -7,7 +7,7 @@ import { candidatesForRun } from './teams.js';
 import { optimiseSquad } from '../fpl/optimiser.js';
 import { suggestTransfers, valuateTeam } from '../fpl/suggester.js';
 import { getConfig } from '../core/model-config.js';
-import type { SquadRules, ChipSetRules } from '../fpl/rules.js';
+import { pickStartingXi, type SquadPlayer, type SquadRules, type ChipSetRules, type StartingXi } from '../fpl/rules.js';
 
 export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Promise<void> {
   const { db } = opts;
@@ -176,6 +176,18 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
   const WeeklySchema = z.object({
     teamId: z.coerce.number().int(),
     horizon: z.union([z.literal(1), z.literal(3), z.literal(6)]).default(3),
+    // P2 (v1.4.2): preview the squad AFTER a suggested move is applied
+    apply: z.object({ out: z.array(z.string()), in: z.array(z.string()) }).nullable().default(null),
+  });
+
+  // P2 (v1.4.2): the same XI payload shape Initial/Chips send to PitchView
+  const xiPayload = (xi: StartingXi): Record<string, unknown> => ({
+    starters: xi.starters.map((p) => p.uid),
+    bench: xi.bench.map((p) => p.uid),
+    formation: xi.formation,
+    captain: xi.captain,
+    vice: xi.vice,
+    xpts: Number(xi.xptsTotal.toFixed(2)),
   });
 
   app.post('/api/modes/weekly', async (req, reply) => {
@@ -203,6 +215,27 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       rules,
       chipRules,
     });
+
+    // P2 (v1.4.2): the engine's picked best XI for THIS team, rendered by the
+    // same PitchView as Initial/Chips — plus the post-transfer variant when a
+    // suggested move is applied
+    const xi = pickStartingXi(squad as SquadPlayer[], rules);
+    const squadCards = await playerCards(runId, [...xi.starters, ...xi.bench].map((p) => p.uid));
+    let applied: { out: string[]; in: string[]; xi: Record<string, unknown>; squad: Record<string, unknown>[] } | null = null;
+    if (parsed.data.apply) {
+      const outSet = new Set(parsed.data.apply.out);
+      const inPlayers = parsed.data.apply.in.map((uid) => byUid.get(uid)).filter((c): c is NonNullable<typeof c> => !!c);
+      const afterSquad = [...squad.filter((p) => !outSet.has(p.uid)), ...inPlayers];
+      if (afterSquad.length === 15) {
+        const afterXi = pickStartingXi(afterSquad as SquadPlayer[], rules);
+        applied = {
+          out: parsed.data.apply.out,
+          in: parsed.data.apply.in,
+          xi: xiPayload(afterXi),
+          squad: await playerCards(runId, [...afterXi.starters, ...afterXi.bench].map((p) => p.uid)),
+        };
+      }
+    }
 
     // enrich with cards
     const enrich = async (moves: typeof suggestions.singles): Promise<unknown[]> =>
@@ -244,6 +277,9 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
 
     return {
       runId,
+      xi: xiPayload(xi),
+      squad: squadCards,
+      applied,
       best0: suggestions.best0,
       singles: await enrich(suggestions.singles),
       doubles: await enrich(suggestions.doubles),

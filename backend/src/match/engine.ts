@@ -252,7 +252,10 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
       fixture_uid: null,
       player_uid: c.uid,
       rank: idx + 1,
-      score: c.doubled.toFixed(3),
+      // B5 (v1.4.2): the pool is ORDERED by ceiling, so the ceiling is the
+      // displayed score — storing the doubled mean made rank 1 show a lower
+      // number than rank 2 (audit M3, live-verified)
+      score: c.ceiling.toFixed(3),
       reasons: JSON.stringify({ doubled_xpts: r2(c.doubled), ceiling: r2(c.ceiling), label: idx === 0 ? 'top_pick' : c.doubled > (captaincy[0]?.doubled ?? 0) ? 'safe_pick' : 'alternative' }),
     });
     targetCount++;

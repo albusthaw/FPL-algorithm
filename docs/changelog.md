@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.4.2 — 2026-08-21 · schema 12
+
+Migration 0012 (`user_teams.kind` + `source_run_id`). engineupgradeplus.md
+release 2 — "the product asks": squad-style everywhere with savable builds,
+the Run data-depth selector on a real subscription model, and the captaincy
+display fix.
+
+- **P2 — Weekly squad style**: `/api/modes/weekly` now returns the engine's
+  picked best XI for the selected team (same `pickStartingXi`, same
+  `PitchView` payload as Initial/Chips — formation, C/V armbands, bench
+  order), plus a post-transfer variant: every suggestion row gained a
+  "preview XI" button that re-picks the XI with the move applied.
+- **P2 — Savable builds**: every generated squad — Initial XI, Free Hit
+  build, Wildcard build, Weekly XI (pre- or post-transfer) — has "Save as
+  team". `user_teams` grew `kind`
+  (`manual|imported|initial_xi|freehit|wildcard|weekly`, default manual) and
+  `source_run_id`, so a build remembers which run priced it. Teams page
+  shows kind + run badges; screenshot confirms land as `imported`; clones
+  inherit their source's kind.
+- **P1 — provider subscription model** (⚙ `provider_plans`): a researched
+  tier catalog per provider (free/pro/standard/basic…, each with depth,
+  rate and cost) with an admin plan selector on every Data-provider card.
+  Selecting a plan snapshots the tier into model_config, finally fills
+  `api_providers.quota_limit` from the plan's rate (audit X5), and re-arms
+  entitlement probes — learned denials are cleared so each gated scope gets
+  ONE fresh try under the new plan.
+- **P1 — Run data-depth selector**: the Run screen's Data-window table
+  gained a per-source "Pull depth" dropdown (days / months / seasons /
+  career; admin-gated). Options = the selected plan's reach ∩ the
+  entitlement table's learned denials, and refused options stay visible with
+  the reason — "why can't I select 5 years on NewsData free" is answered in
+  the dropdown itself. Selections write ⚙ `history_depth.per_provider`; the
+  next launch run backfills exactly what was selected through the resumable
+  `history_pulls` ledger and reports what was pulled and what the plan
+  refused.
+- **P1 — new backfill executors**: football-data past seasons
+  (`?season=YYYY`, paid scope, PLAN_DENIED learned), API-Football 2022–2024
+  fixtures + season injury logs (historical injuries land `is_active=false`
+  as pattern data), NewsData archive sweep (paid tiers), Understat
+  per-season xG aggregates (merged into `player_season_history.stats` beside
+  the FPL career numbers). All ledgered, resumable, entitlement-guarded.
+- **B5 — captaincy display = ceiling** (audit M3): the pool was ordered by
+  simulated P90 ceiling but displayed the doubled mean, so rank 1 could show
+  a lower number than rank 2. The stored score is now the ceiling; the
+  Weekly panel labels it and shows the mean alongside.
+- Tests: 10 new integration tests (kind roundtrip, plan catalog + quota
+  fill, depth folding, plan ∩ entitlement gating, plan-refusal report lines
+  with zero API calls). 135 backend tests green.
+
 ## v1.4.1 — 2026-08-21 · schema 11
 
 Migration 0011 (`key_audit`). engineupgradeplus.md release 1 — "stop the

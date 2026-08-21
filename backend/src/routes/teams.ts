@@ -21,6 +21,9 @@ const TeamPlayerSchema = z.object({
   benchPosition: z.number().int().min(1).max(4).nullable().default(null),
 });
 
+/** P2 (v1.4.2): what produced this squad — generated builds are savable. */
+export const TEAM_KINDS = ['manual', 'imported', 'initial_xi', 'freehit', 'wildcard', 'weekly'] as const;
+
 const TeamSchema = z.object({
   name: z.string().min(1).max(80),
   bank: z.number().int().min(0).max(2000).default(0),
@@ -28,6 +31,9 @@ const TeamSchema = z.object({
   chipsUsed: z.array(z.object({ chip: z.string(), set: z.number().int() })).default([]),
   notes: z.string().max(2000).default(''),
   players: z.array(TeamPlayerSchema).max(15).default([]),
+  // optional so a PUT without them keeps the stored values
+  kind: z.enum(TEAM_KINDS).optional(),
+  sourceRunId: z.number().int().nullable().optional(),
 });
 
 export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Promise<void> {
@@ -95,6 +101,8 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
         free_transfers: parsed.data.freeTransfers,
         chips_used: JSON.stringify(parsed.data.chipsUsed),
         notes: parsed.data.notes,
+        kind: parsed.data.kind ?? 'manual',
+        source_run_id: parsed.data.sourceRunId ?? null,
       })
       .returning('id');
     const teamId = Number(row.id ?? row);
@@ -115,6 +123,8 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       free_transfers: parsed.data.freeTransfers,
       chips_used: JSON.stringify(parsed.data.chipsUsed),
       notes: parsed.data.notes,
+      kind: parsed.data.kind ?? existing.kind ?? 'manual',
+      source_run_id: parsed.data.sourceRunId !== undefined ? parsed.data.sourceRunId : existing.source_run_id,
       updated_at: db.fn.now(),
     });
     await replaceTeamPlayers(db, id, parsed.data.players);
@@ -147,6 +157,8 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
         free_transfers: source.free_transfers,
         chips_used: JSON.stringify(source.chips_used ?? []),
         notes: source.notes,
+        kind: source.kind ?? 'manual',
+        source_run_id: source.source_run_id ?? null,
       })
       .returning('id');
     const newId = Number(row.id ?? row);
@@ -313,7 +325,7 @@ export async function teamRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       if (!team) return reply.code(404).send({ error: 'team not found' });
       await db('user_teams').where({ id: teamId }).update({ updated_at: db.fn.now() });
     } else {
-      const [row] = await db('user_teams').insert({ user_id: req.user.id, name: parsed.data.name }).returning('id');
+      const [row] = await db('user_teams').insert({ user_id: req.user.id, name: parsed.data.name, kind: 'imported' }).returning('id');
       teamId = Number(row.id ?? row);
     }
     await replaceTeamPlayers(db, teamId, parsed.data.players);

@@ -53,9 +53,13 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
     const recentNews = await db('news_items').where('fetched_at', '>', new Date(Date.now() - 7 * 86_400_000)).count('* as c');
     // launch-run data window: how far back each provider CAN reach, what the
     // configured ⚙ history_depth will pull, and what is already imported
-    const { historyCoverage, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+    const { historyCoverage, depthSelectorOptions, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+    const { DEFAULT_PROVIDER_PLANS } = await import('../ingest/plans.js');
     const depthCfg = await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => DEFAULT_HISTORY_DEPTH);
     const coverage = await historyCoverage(db, depthCfg ?? DEFAULT_HISTORY_DEPTH);
+    // P1 (v1.4.2): selector column options = subscription plan ∩ entitlements
+    const plans = (await getConfig<typeof DEFAULT_PROVIDER_PLANS>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
+    const depthOptions = await depthSelectorOptions(db, depthCfg ?? DEFAULT_HISTORY_DEPTH, plans);
     return {
       runId,
       candidates,
@@ -66,6 +70,8 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
       recentNewsCount: Number((recentNews[0] as { c: unknown }).c ?? 0),
       historyDepth: depthCfg ?? DEFAULT_HISTORY_DEPTH,
       historyCoverage: coverage,
+      depthOptions,
+      isAdmin: req.user.role === 'admin',
     };
   });
 
