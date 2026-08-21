@@ -44,7 +44,14 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
   const ffCfg = await getConfig<Record<string, unknown>>(db, 'feature_factory');
   const weightsCfg = await getConfig<Record<string, number>>(db, 'stat_score_weights');
   const capsCfg = await getConfig<{ unavailable: number; doubtful: number }>(db, 'stat_score_caps');
-  const attackingCfg = await getConfig<{ finishing_clip: [number, number]; finishing_min_minutes: number }>(db, 'attacking');
+  const attackingCfg = await getConfig<{ finishing_clip: [number, number]; finishing_min_minutes: number; assist_conv?: number }>(db, 'attacking');
+  // statengineexpansion.md ⚙ keys (X1–X5) — tolerate absence on old configs
+  const minutesRealism = await getConfig<{ started_min_shrink_k: number; e_min_start_cap: Record<string, number>; top_start_share_p: number; horizon_target_mult?: number }>(db, 'minutes_realism').catch(() => null);
+  const pricePrior = await getConfig<import('./l0-features.js').PricePriorConfig>(db, 'price_prior').catch(() => null);
+  const spCfg = await getConfig<{ team_pens_per_match: number; taker_share: Record<string, number>; pen_conversion: number; pen_xg_deduction: number; corner_dfk_xa_bump: number }>(db, 'set_piece_ev').catch(() => null);
+  const bonusCfg = await getConfig<{ fwd_mid: { base: number; slope: number; cap: number }; def: { base: number; slope: number; cs_term: number; cap: number }; gk: { base: number; cs_term: number; saves_norm: number; cap: number } }>(db, 'bonus_model').catch(() => null);
+  const featureDecay = await getConfig<{ rate_xi_per_day: number }>(db, 'feature_decay').catch(() => null);
+  const humanCfg = await getConfig<{ ownership_momentum_weight: number; suspension_tightrope: { yellows: number; haircut_next3: number; haircut_next6: number } }>(db, 'human_factors').catch(() => null);
   const configVersion = await getConfigVersion(db, 'stat_score_weights');
 
   // ── events: the next 8 upcoming events as-of now
@@ -234,7 +241,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
   const allStats = await db('player_match_stats')
     .whereNotNull('kickoff_utc')
     .where('kickoff_utc', '<', asOf)
-    .select('player_uid', 'kickoff_utc', 'minutes', 'starts', 'goals', 'assists', 'saves', 'cbit', 'cbirt', 'defcon_count', 'xg', 'xa', 'fpl_points', 'yc', 'rc');
+    .select('player_uid', 'kickoff_utc', 'minutes', 'starts', 'goals', 'assists', 'saves', 'cbit', 'cbirt', 'defcon_count', 'xg', 'npxg', 'xa', 'fpl_points', 'yc', 'rc');
   const rowsByPlayer = new Map<string, MatchRow[]>();
   for (const r of allStats) {
     const row: MatchRow = {
@@ -248,6 +255,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       cbirt: r.cbirt,
       defconCount: r.defcon_count,
       xg: r.xg != null ? Number(r.xg) : null,
+      npxg: r.npxg != null ? Number(r.npxg) : null,
       xa: r.xa != null ? Number(r.xa) : null,
       fplPoints: r.fpl_points,
       yc: r.yc,
@@ -265,6 +273,22 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       .filter((p) => rowsByPlayer.has(p.uid))
       .map((p) => ({ position: p.position, price: p.now_cost, rows: rowsByPlayer.get(p.uid)! })),
   );
+
+  // X1: realism config rides inside the minutes config
+  const minutesCfgFull = { ...minutesCfg, realism: minutesRealism ?? undefined };
+
+  // X2: set-piece roles (pens/corners/DFK orders) — FPL bootstrap truth
+  const setPieceRows = await db('set_piece_roles').select('player_uid', 'pens_order', 'dfk_order', 'corners_order');
+  const setPieceByPlayer = new Map(setPieceRows.map((r) => [r.player_uid, r]));
+
+  // X5: current-season yellows for the suspension tightrope
+  const seasonStart = new Date(Date.UTC(asOf.getUTCMonth() >= 7 ? asOf.getUTCFullYear() : asOf.getUTCFullYear() - 1, 7, 1));
+  const ycRows = (await db('player_match_stats')
+    .where('kickoff_utc', '>=', seasonStart)
+    .select('player_uid')
+    .sum({ yc: 'yc' })
+    .groupBy('player_uid')) as { player_uid: string; yc: unknown }[];
+  const seasonYellows = new Map(ycRows.map((r) => [r.player_uid, Number(r.yc ?? 0)]));
 
   // injuries + confirmed lineups
   const activeInjuries = await db('injuries').where('is_active', true).select('player_uid', 'kind', 'expected_return_date');
@@ -325,8 +349,11 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     const features = computePlayerFeatures(rows, asOf, p.position, {
       priors,
       price: p.now_cost,
+      pricePrior: pricePrior ?? undefined,
       shrinkageK: Number(ffCfg.shrinkage_k ?? 6),
-      decayXi: Number(ffCfg.decay_xi_player ?? 0.01),
+      shrinkageKAttacking: Number(ffCfg.shrinkage_k_attacking ?? ffCfg.shrinkage_k ?? 6),
+      // X4: gentler in-season decay — a title-season sample keeps its weight
+      decayXi: featureDecay?.rate_xi_per_day ?? Number(ffCfg.decay_xi_player ?? 0.01),
     });
 
     // finishing-skill multiplier (bounded, proven finishers only)
@@ -396,7 +423,9 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           position: p.position,
           selectedByPct: Number(p.selected_by_percent),
           startShare5: features.startShare5,
+          startShareLong: features.startShareLong,
           minutesEwma: features.minutesEwma,
+          startedMinutesAvg: features.startedMinutesAvg,
           startedLast: features.startedLast,
           daysSinceLastMatch: features.daysSinceLastMatch,
           congested,
@@ -404,7 +433,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           returnedFromInjury,
           fixturesAhead: fixtureIdx,
         },
-        minutesCfg,
+        minutesCfgFull,
       );
 
       // a non-finite probability would silently poison everything downstream
@@ -420,6 +449,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           pAny: minutes.pAny,
           eMin: minutes.eMin,
           xg90: features.xg90,
+          npxg90: features.npxg90,
           xa90: features.xa90,
           saves90: features.saves90,
           yc90: features.yc90,
@@ -430,6 +460,13 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           pCsTeam: isHome ? fp.pred.pCsHome : fp.pred.pCsAway,
           eConcedePts: isHome ? fp.pred.eConcedePtsHome : fp.pred.eConcedePtsAway,
           lambdaOpponent: isHome ? fp.blendAway : fp.blendHome,
+          // X2/X3: set-piece EV + returns-driven bonus + xA→assist conversion
+          pensOrder: setPieceByPlayer.get(p.uid)?.pens_order ?? null,
+          cornerDfkOrder:
+            (setPieceByPlayer.get(p.uid)?.corners_order ?? 99) === 1 || (setPieceByPlayer.get(p.uid)?.dfk_order ?? 99) === 1 ? 1 : null,
+          spCfg: spCfg ?? undefined,
+          assistConv: attackingCfg.assist_conv ?? 1.05,
+          bonusCfg: bonusCfg ?? undefined,
         },
         rules,
         bonusProfiles,
@@ -497,6 +534,14 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     };
     const fdrMap = p.position === 'GK' || p.position === 'DEF' ? fdrByEventDef : fdrByEventAtt;
 
+    // X5 suspension tightrope: one booking from a ban shaves the horizons
+    let tightrope3 = 1;
+    let tightrope6 = 1;
+    if (humanCfg && (seasonYellows.get(p.uid) ?? 0) >= humanCfg.suspension_tightrope.yellows) {
+      tightrope3 = humanCfg.suspension_tightrope.haircut_next3;
+      tightrope6 = humanCfg.suspension_tightrope.haircut_next6;
+    }
+
     scored.push({
       uid: p.uid,
       position: p.position,
@@ -504,8 +549,8 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       features,
       xptsPerEvent,
       xptsN1: sumEvents(1),
-      xptsN3: sumEvents(3),
-      xptsN6: sumEvents(6),
+      xptsN3: sumEvents(3) * tightrope3,
+      xptsN6: sumEvents(6) * tightrope6,
       pStartNext,
       pAppearanceNext,
       xcsNext,
@@ -548,6 +593,10 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     const zForm = z((s) => s.formEwma);
     const zValue = z((s) => (s.price > 0 ? s.xptsN3 / (s.price / 10) : 0));
     const zFdr = z((s) => s.fdrN3 ?? 5);
+    // X5 crowd wisdom: ten million managers moving toward a player is
+    // information — bounded (⚙ w7) so it can never dominate the model
+    const zMomentum = z((s) => Math.sign(s.transfersNet) * Math.log1p(Math.abs(s.transfersNet)));
+    const w7 = humanCfg?.ownership_momentum_weight ?? 0;
 
     const raw = new Map<string, number>();
     for (const s of group) {
@@ -558,7 +607,8 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           (weightsCfg.w3 ?? 0.1) * (zForm.get(s.uid) ?? 0) +
           (weightsCfg.w4 ?? 0.15) * s.pStartNext +
           (weightsCfg.w5 ?? 0.12) * (zValue.get(s.uid) ?? 0) +
-          (weightsCfg.w6 ?? 0.08) * (zFdr.get(s.uid) ?? 0),
+          (weightsCfg.w6 ?? 0.08) * (zFdr.get(s.uid) ?? 0) +
+          w7 * (zMomentum.get(s.uid) ?? 0),
       );
     }
     // percentile map within position
@@ -590,7 +640,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     xg_per90: s.features.xg90.toFixed(3),
     xa_per90: s.features.xa90.toFixed(3),
     xgi_per90: (s.features.xg90 + s.features.xa90).toFixed(3),
-    npxg_per90: s.features.xg90.toFixed(3),
+    npxg_per90: s.features.npxg90.toFixed(3),
     xcs: s.xcsNext.toFixed(4),
     saves_per90: s.features.saves90.toFixed(3),
     defcon_per90: (s.position === 'GK' || s.position === 'DEF' ? s.features.cbit90 : s.features.cbirt90).toFixed(3),

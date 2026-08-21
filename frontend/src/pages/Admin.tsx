@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { api, ApiError, n } from '../api';
 import { Loading } from '../components/Layout';
 
-type Tab = 'users' | 'providers' | 'ai' | 'weights' | 'logs' | 'queue';
+type Tab = 'users' | 'providers' | 'ai' | 'weights' | 'logs' | 'queue' | 'coverage';
 
 export function AdminPage(): ReactNode {
   const [tab, setTab] = useState<Tab>('users');
@@ -12,9 +12,9 @@ export function AdminPage(): ReactNode {
         <p className="kicker">Admin · The Back Office</p>
         <div className="section-head"><h2 className="section-title">Administration</h2></div>
         <div className="tab-row" data-testid="admin-tabs">
-          {(['users', 'providers', 'ai', 'weights', 'logs', 'queue'] as Tab[]).map((t) => (
+          {(['users', 'providers', 'ai', 'weights', 'logs', 'queue', 'coverage'] as Tab[]).map((t) => (
             <button key={t} className={`chip-paper ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)} data-testid={`admin-tab-${t}`}>
-              {{ users: 'Users & tokens', providers: 'Data providers (max 2)', ai: 'AI provider (max 1)', weights: 'Ranking weights', logs: 'Logs & costs', queue: 'Review queue' }[t]}
+              {{ users: 'Users & tokens', providers: 'Data providers (max 2)', ai: 'AI provider (max 1)', weights: 'Ranking weights', logs: 'Logs & costs', queue: 'Review queue', coverage: 'Data coverage' }[t]}
             </button>
           ))}
         </div>
@@ -24,6 +24,7 @@ export function AdminPage(): ReactNode {
         {tab === 'weights' && <WeightsTab />}
         {tab === 'logs' && <LogsTab />}
         {tab === 'queue' && <QueueTab />}
+        {tab === 'coverage' && <CoverageTab />}
       </section>
     </div>
   );
@@ -521,6 +522,65 @@ function QueueTab(): ReactNode {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+interface CoverageRow {
+  uid: string; web_name: string; position: string; club: string | null; status: string;
+  history_matches: number; history_minutes: number; xg_rows: number; news_7d: number;
+  identities: number; set_piece: boolean; in_latest_run: boolean;
+}
+
+function CoverageTab(): ReactNode {
+  const [data, setData] = useState<{ summary: { runId: number | null; totalActive: number; inLatestRun: number; withHistory: number; withNews7d: number; withSetPiece: number; zeroHistory: number }; players: CoverageRow[] } | null>(null);
+  const [gapsOnly, setGapsOnly] = useState(false);
+
+  useEffect(() => {
+    void api.get<typeof data>('/api/admin/data-coverage').then(setData);
+  }, []);
+
+  if (!data) return <Loading />;
+  const { summary } = data;
+  const shown = gapsOnly
+    ? data.players.filter((p) => !p.in_latest_run || p.history_matches === 0)
+    : data.players;
+  return (
+    <div className="stack">
+      <div className="stat-panel">
+        <h4>Coverage at a glance</h4>
+        <div className="stat-row"><span>Active players</span><b>{summary.totalActive}</b></div>
+        <div className="stat-row"><span>Scored in the latest rankings</span><b data-testid="coverage-in-run">{summary.inLatestRun} / {summary.totalActive}</b></div>
+        <div className="stat-row"><span>With match history</span><b>{summary.withHistory}</b></div>
+        <div className="stat-row"><span>With news this week</span><b>{summary.withNews7d}</b></div>
+        <div className="stat-row"><span>With set-piece duty data</span><b>{summary.withSetPiece}</b></div>
+        <div className="stat-row"><span>No history yet (season-start estimates)</span><b>{summary.zeroHistory}</b></div>
+      </div>
+      <label className="chip-paper" style={{ cursor: 'pointer', alignSelf: 'flex-start' }}>
+        <input type="checkbox" checked={gapsOnly} onChange={(e) => setGapsOnly(e.target.checked)} style={{ marginRight: 8, accentColor: 'var(--brick)' }} />
+        show gaps only
+      </label>
+      <div className="table-wrap">
+        <table data-testid="coverage-table">
+          <thead><tr><th>Player</th><th>Pos</th><th>Club</th><th>Matches</th><th>Minutes</th><th>xG rows</th><th>News 7d</th><th>Sources</th><th>Set piece</th><th>In rankings</th></tr></thead>
+          <tbody>
+            {shown.slice(0, 400).map((p) => (
+              <tr key={p.uid}>
+                <td className="team-name">{p.web_name}</td>
+                <td className="mono">{p.position}</td>
+                <td className="mono">{p.club ?? '—'}</td>
+                <td className="mono">{p.history_matches}</td>
+                <td className="mono">{p.history_minutes.toLocaleString()}</td>
+                <td className="mono">{p.xg_rows}</td>
+                <td className="mono">{p.news_7d}</td>
+                <td className="mono">{p.identities}</td>
+                <td>{p.set_piece ? <span className="badge ok">yes</span> : <span className="muted">—</span>}</td>
+                <td>{p.in_latest_run ? <span className="badge ok">yes</span> : <span className="badge bad">missing</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.3.0 — 2026-08-21 · schema 9
+
+Migration 0009 (`team_identities`). The statistical-engine expansion
+(statengineexpansion.md, executed in full): market-grade premium spread,
+human factors, a data-coverage audit, and provider hardening.
+
+- **Why**: the initial-XI suggestion led the line with a £6.0 rotation
+  striker while Haaland projected only 15% above him over 6 GWs. Root
+  causes verified against live data and market references (fplreview.com,
+  fplcopilot.com, fantasyfootballfix.com): minutes EWMA poisoned by
+  cameos, penalties stored but never scored, flat bonus, one-prior-fits-
+  every-price shrinkage, horizon regression treating all starters alike.
+- **X1 minutes realism** (⚙ `minutes_realism`): E[min|start] now blends the
+  player's OWN started-matches average (new L0 feature) with the position
+  table; every-week starters (start share ≥0.95) hold p_start 0.95.
+- **X2 set-piece EV** (⚙ `set_piece_ev`): explicit penalty expected value
+  for designated takers with the taker's penalty xG removed from the base
+  rate (non-penalty xG when imported, calibrated deduction otherwise);
+  corner/direct-FK first takers get a dead-ball xA stream.
+- **X3 bonus rides returns** (⚙ `bonus_model`): E[bonus] scales with
+  expected goal involvement per position instead of flat profile means.
+- **X4 gentler decay + slower attacking stabilisation**
+  (⚙ `feature_decay`, `feature_factory.shrinkage_k_attacking`).
+- **X5 human factors** (⚙ `human_factors`): ownership-momentum term in
+  stat_score (bounded w7); suspension-tightrope haircut for players one
+  yellow from a ban.
+- **X7 price-continuous attacking prior** (⚙ `price_prior`): attacking
+  rates shrink toward a price-scaled target — a £6.0 and a £15.5 forward
+  no longer share a prior.
+- **X8 horizon start target** (⚙ `minutes_realism.horizon_target_mult`):
+  the 6-GW start-probability target is the player's own long-run start
+  share, not the positional base — premiums stop bleeding phantom minutes.
+- **Optimiser**: ILP variables declared as true binaries (the `ints`
+  declaration let the solver take cheap players twice and silently fall
+  back to greedy); captain doubling added to the objective; 1% MIP gap +
+  5s time limit. Initial squads now carry a premium spearhead.
+- **Data-coverage audit** (X6): `GET /api/admin/data-coverage` + admin
+  "Data coverage" tab — per-player history/news/identity/set-piece/matrix
+  presence with a gaps filter. Verified: 600/600 active players in the
+  latest run.
+- **team_identities table** (migration 0009): provider team-id mappings
+  moved out of player_identities (whose FK rejected them, silently
+  emptying the API-Football team map and flooding the resolution queue).
+  API-Football adapter seeds it lazily; club-name alias map added;
+  in-200 `access` errors (account suspended) classify as AUTH.
+- **TheSportsDB**: free keys cap the league search at 10 rows — the
+  adapter backfills remaining clubs per-team; live-verified 20/20 badges.
+- Gates: Haaland 6.80 next-1 / 37.07 next-6 (market 6.6–6.8 / 37.9);
+  FWD top-1 vs top-10 spread 17.0; £6.0 rotation striker at 54% of
+  Haaland; captaincy #1/#2 = B.Fernandes/Haaland. 95 backend tests green.
+
 ## v1.2.0 — 2026-08-21 · schema 8
 
 No migration. Every provider pull live-verified with real keys; the AI pass

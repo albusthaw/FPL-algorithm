@@ -86,22 +86,36 @@ function tryIlp(
   const model: Record<string, unknown> = {
     optimize: 'obj',
     opType: 'max',
+    // 1% MIP gap + hard time limit: adversarial instances must fall through
+    // to the greedy rather than hang the request
+    options: { tolerance: 0.01, timeout: 5000 },
     constraints: {
       cost: { max: budget },
       squad: { equal: rules.squad_size },
+      captain: { max: 1 },
     } as Record<string, unknown>,
     variables: {} as Record<string, Record<string, number>>,
-    ints: {} as Record<string, number>,
+    // binaries, NOT ints: jsLPsolver integers are unbounded, and an unbounded
+    // model "fills" the squad by taking cheap players twice
+    binaries: {} as Record<string, number>,
   };
   const constraints = model.constraints as Record<string, unknown>;
   const variables = model.variables as Record<string, Record<string, number>>;
-  const ints = model.ints as Record<string, number>;
+  const binaries = model.binaries as Record<string, number>;
 
   for (const [pos, n] of Object.entries(rules.positions)) constraints[`pos_${pos}`] = { equal: n };
   const clubs = new Set(pool.map((c) => c.club));
   for (const club of clubs) constraints[`club_${club}`] = { max: rules.max_per_club };
   for (const uid of locked) constraints[`lock_${uid}`] = { equal: 1 };
 
+  // captain doubling is real scoring, not garnish: one squad member scores
+  // twice every week, which is precisely what premium concentration buys.
+  // cap_x ≤ x via link constraint; Σ cap_x ≤ 1 adds the best xpts once.
+  // Only the top few by xpts get captain variables — the true captain always
+  // sits there, and a small captain layer keeps branch-and-bound tractable.
+  const capCandidates = new Set(
+    [...pool].sort((a, b) => b.xpts - a.xpts).slice(0, 10).map((c) => c.uid),
+  );
   for (const c of pool) {
     const v: Record<string, number> = {
       obj: objectiveValue(c, benchWeight),
@@ -112,7 +126,13 @@ function tryIlp(
     };
     if (locked.has(c.uid)) v[`lock_${c.uid}`] = 1;
     variables[c.uid] = v;
-    ints[c.uid] = 1;
+    binaries[c.uid] = 1;
+    if (capCandidates.has(c.uid)) {
+      constraints[`capLink_${c.uid}`] = { max: 0 };
+      v[`capLink_${c.uid}`] = -1;
+      variables[`cap_${c.uid}`] = { obj: c.xpts, captain: 1, [`capLink_${c.uid}`]: 1 };
+      binaries[`cap_${c.uid}`] = 1;
+    }
   }
 
   const result = solver.Solve(model) as Record<string, unknown> & { feasible: boolean };

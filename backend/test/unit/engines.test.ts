@@ -3,7 +3,7 @@ import { fitTeamStrength, predictFromLambdas, fixtureLambdas, type StrengthMatch
 import { deMargin1x2, solveMarketLambdas, blendLambdas } from '../../src/stats/l2-odds.js';
 import { computePlayerFeatures, type MatchRow } from '../../src/stats/l0-features.js';
 import { predictMinutes, type MinutesConfig } from '../../src/stats/l3-minutes.js';
-import { composeXpts, pointsFromStats, expectedSavePoints, type ScoringRules, type BonusProfiles } from '../../src/stats/l9-composer.js';
+import { composeXpts, pointsFromStats, expectedSavePoints, type ScoringRules, type BonusProfiles, type ComposeInput } from '../../src/stats/l9-composer.js';
 import { normaliseName, trigramSimilarity } from '../../src/players/resolver.js';
 import { optimiseSquad, type OptimiserCandidate } from '../../src/fpl/optimiser.js';
 import { DEFAULT_CONFIG } from '../../src/core/model-config.js';
@@ -465,5 +465,176 @@ describe('captaincy P90 ceiling (seeded simulation)', () => {
     const { mulberry32, simulateP90 } = await import('../../src/match/engine.js');
     const scoring = { goal: { FWD: 4 }, clean_sheet: { FWD: 0 }, assist: 3 };
     expect(simulateP90([], 'FWD', scoring, mulberry32(1))).toBe(0);
+  });
+});
+
+describe('statengineexpansion X1 — minutes realism', () => {
+  const realism = DEFAULT_CONFIG.minutes_realism as NonNullable<MinutesConfig['realism']>;
+  const cfgR: MinutesConfig = { ...minutesCfg, realism };
+  const nailed = {
+    status: 'a', chanceNext: null, activeInjury: null, confirmedLineup: null,
+    position: 'FWD', startShare5: 1, minutesEwma: 66, startedMinutesAvg: 88.5,
+    startedLast: true, daysSinceLastMatch: 5, congested: false, newSigning: false,
+    returnedFromInjury: false, fixturesAhead: 1,
+  } as const;
+
+  it('a 90-minute striker projects near-full minutes, not table-capped 78', () => {
+    // minutesEwma poisoned by rests (66) but started matches average 88.5:
+    // E[min|start] must follow the started-minutes signal
+    const withRealism = predictMinutes({ ...nailed }, cfgR);
+    const legacy = predictMinutes({ ...nailed }, minutesCfg);
+    expect(withRealism.eMin).toBeGreaterThan(legacy.eMin);
+    expect(withRealism.eMin).toBeGreaterThan(80);
+    expect(withRealism.eMin).toBeLessThanOrEqual(realism.e_min_start_cap.FWD!);
+  });
+
+  it('every-week starters get the lifted 0.95 base', () => {
+    const p = predictMinutes({ ...nailed }, cfgR);
+    expect(p.pStart).toBeGreaterThanOrEqual(0.95);
+  });
+
+  it('shrinkage: thin history stays near the position table', () => {
+    // one start in the window at 90 min — the table prior must dominate.
+    // p_sub zeroed so eMin/pStart isolates E[min|start].
+    const noSub: MinutesConfig = { ...cfgR, p_sub: { GK: 0, DEF: 0, MID: 0, FWD: 0 } };
+    const thin = predictMinutes({ ...nailed, startShare5: 0.1, minutesEwma: 20, startedMinutesAvg: 90 }, noSub);
+    const tableEmin = (minutesCfg.e_min_start as Record<string, number>).FWD!;
+    const blended = (1 * 90 + realism.started_min_shrink_k * tableEmin) / (1 + realism.started_min_shrink_k);
+    expect(thin.eMin / Math.max(0.01, thin.pStart)).toBeCloseTo(blended, 1);
+  });
+
+  it('no startedMinutesAvg → E[min|start] falls back to the legacy scaling', () => {
+    // isolate E[min|start] (p_sub zeroed): with no started-minutes signal the
+    // realism config must not change the per-start expectation itself
+    const noSub = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
+    const a = predictMinutes({ ...nailed, startedMinutesAvg: 0 }, { ...cfgR, p_sub: noSub });
+    const b = predictMinutes({ ...nailed, startedMinutesAvg: 0 }, { ...minutesCfg, p_sub: noSub });
+    expect(a.eMin / a.pStart).toBeCloseTo(b.eMin / b.pStart, 6);
+  });
+});
+
+describe('statengineexpansion X2/X3 — set-piece EV and returns-driven bonus', () => {
+  const spCfg = DEFAULT_CONFIG.set_piece_ev as NonNullable<ComposeInput['spCfg']>;
+  const bonusCfg = DEFAULT_CONFIG.bonus_model as NonNullable<ComposeInput['bonusCfg']>;
+  const premium: ComposeInput = {
+    position: 'FWD', pStart: 0.95, p60: 0.78, pAny: 0.97, eMin: 85,
+    xg90: 0.72, xa90: 0.15, saves90: 0, yc90: 0.1, rc90: 0.003,
+    defconHitRate: 0.01, fixtureMultAtt: 1.15, pCsTeam: 0.35,
+    eConcedePts: -0.5, lambdaOpponent: 1.1,
+  };
+
+  it('first-choice penalty taker gains xPts vs identical non-taker', () => {
+    const taker = composeXpts({ ...premium, pensOrder: 1, spCfg, bonusCfg }, rules, bonusProfiles);
+    const nonTaker = composeXpts({ ...premium, pensOrder: null, spCfg, bonusCfg }, rules, bonusProfiles);
+    expect(taker.eGoals).toBeGreaterThan(nonTaker.eGoals);
+    expect(taker.total).toBeGreaterThan(nonTaker.total);
+    // pen EV net of the xG deduction ≈ 0.28·1.15·0.85·0.76 − 0.06·exposure·mult ≈ +0.14 goals
+    expect(taker.eGoals - nonTaker.eGoals).toBeGreaterThan(0.08);
+    expect(taker.eGoals - nonTaker.eGoals).toBeLessThan(0.25);
+  });
+
+  it('corner/DFK first taker gains assist EV', () => {
+    const taker = composeXpts({ ...premium, cornerDfkOrder: 1, spCfg }, rules, bonusProfiles);
+    const nonTaker = composeXpts({ ...premium, spCfg }, rules, bonusProfiles);
+    expect(taker.eAssists).toBeGreaterThan(nonTaker.eAssists);
+  });
+
+  it('returns-driven bonus separates a premium from a budget forward', () => {
+    const budget: ComposeInput = { ...premium, xg90: 0.28, xa90: 0.06, fixtureMultAtt: 0.95 };
+    const prem = composeXpts({ ...premium, pensOrder: 1, spCfg, bonusCfg }, rules, bonusProfiles);
+    const bud = composeXpts({ ...budget, bonusCfg }, rules, bonusProfiles);
+    expect(prem.bonus).toBeGreaterThan(bud.bonus * 1.8);
+    expect(prem.bonus).toBeLessThanOrEqual(bonusCfg.fwd_mid.cap);
+    // the whole point of the expansion: a real premium clears daylight
+    expect(prem.total).toBeGreaterThan(bud.total * 1.5);
+  });
+
+  it('bonus stays capped and non-negative across extremes', () => {
+    for (const xg of [0, 0.3, 0.9, 2]) {
+      const b = composeXpts({ ...premium, xg90: xg, pensOrder: 1, spCfg, bonusCfg }, rules, bonusProfiles);
+      expect(b.bonus).toBeGreaterThanOrEqual(0);
+      expect(b.bonus).toBeLessThanOrEqual(bonusCfg.fwd_mid.cap);
+    }
+  });
+
+  it('assist conversion multiplies the assist stream only', () => {
+    const withConv = composeXpts({ ...premium, assistConv: 1.1 }, rules, bonusProfiles);
+    const without = composeXpts({ ...premium }, rules, bonusProfiles);
+    expect(withConv.eAssists).toBeCloseTo(without.eAssists * 1.1, 6);
+    expect(withConv.eGoals).toBeCloseTo(without.eGoals, 6);
+  });
+});
+
+describe('statengineexpansion X7 — price-continuous attacking prior', () => {
+  const cfg = DEFAULT_CONFIG.price_prior as import('../../src/stats/l0-features.js').PricePriorConfig;
+
+  it('a £6.0 and a £15.5 forward shrink toward different targets', async () => {
+    const { pricePriorRates } = await import('../../src/stats/l0-features.js');
+    const budget = pricePriorRates(cfg, 'FWD', 60)!;
+    const premium = pricePriorRates(cfg, 'FWD', 155)!;
+    expect(budget.xg90).toBeLessThan(0.36);
+    expect(premium.xg90).toBeGreaterThan(0.7);
+    expect(premium.xg90 / budget.xg90).toBeGreaterThan(2);
+  });
+
+  it('multiplier is clamped to mult_range', async () => {
+    const { pricePriorRates } = await import('../../src/stats/l0-features.js');
+    const absurd = pricePriorRates(cfg, 'MID', 400)!;
+    expect(absurd.xg90).toBeLessThanOrEqual(cfg.xg90_at_ref.MID! * cfg.mult_range[1] + 1e-9);
+    const dirt = pricePriorRates(cfg, 'MID', 10)!;
+    expect(dirt.xg90).toBeGreaterThanOrEqual(cfg.xg90_at_ref.MID! * cfg.mult_range[0] - 1e-9);
+  });
+
+  it('shrunk xg90 separates a cameo forward from a premium with same raw rate', () => {
+    // both show raw 0.48 xg90, but one has 805 min, the other 2950
+    const mk = (minutes: number, price: number) => {
+      const rows: MatchRow[] = [];
+      for (let i = 0; i < 38; i++) {
+        rows.push({
+          kickoff: new Date(Date.UTC(2026, 0, 1 + i * 7)),
+          minutes: minutes / 38,
+          starts: minutes > 2000,
+          goals: 0, assists: 0, saves: 0, cbit: 0, cbirt: 0, defconCount: 0,
+          xg: (0.48 * (minutes / 38)) / 90, xa: 0, fplPoints: 2, yc: 0, rc: 0,
+        });
+      }
+      return computePlayerFeatures(rows, new Date(Date.UTC(2026, 7, 1)), 'FWD', {
+        price,
+        pricePrior: cfg,
+        decayXi: 0.005,
+      });
+    };
+    const cameo = mk(805, 60);
+    const nailed = mk(2950, 155);
+    expect(cameo.xg90).toBeLessThan(0.45);   // pulled down toward the £6.0 prior
+    expect(nailed.xg90).toBeGreaterThan(0.5); // large sample holds near raw
+  });
+});
+
+describe('statengineexpansion X8 — horizon target from long-run start share', () => {
+  const realism = { ...(DEFAULT_CONFIG.minutes_realism as NonNullable<MinutesConfig['realism']>) };
+  const cfgR: MinutesConfig = { ...minutesCfg, realism };
+  const base = {
+    status: 'a', chanceNext: null, activeInjury: null, confirmedLineup: null,
+    position: 'FWD', minutesEwma: 80, startedMinutesAvg: 88,
+    startedLast: true, daysSinceLastMatch: 5, congested: false, newSigning: false,
+    returnedFromInjury: false,
+  } as const;
+
+  it('a career starter keeps high pStart six fixtures out; a cameo player regresses down', () => {
+    const nailed6 = predictMinutes({ ...base, startShare5: 1, startShareLong: 0.9, fixturesAhead: 6 }, cfgR);
+    const cameo6 = predictMinutes({ ...base, startShare5: 1, startShareLong: 0.21, fixturesAhead: 6 }, cfgR);
+    expect(nailed6.pStart).toBeGreaterThan(0.85);
+    expect(cameo6.pStart).toBeLessThan(nailed6.pStart - 0.1);
+    // without the realism config both collapse toward the positional base
+    const legacy6 = predictMinutes({ ...base, startShare5: 1, startShareLong: 0.9, fixturesAhead: 6 }, minutesCfg);
+    expect(legacy6.pStart).toBeLessThan(nailed6.pStart);
+  });
+
+  it('horizon target never exceeds 0.95 and respects doubt flags', () => {
+    const doubtful = predictMinutes({ ...base, chanceNext: 75, startShare5: 1, startShareLong: 1, fixturesAhead: 6 }, cfgR);
+    const fit = predictMinutes({ ...base, startShare5: 1, startShareLong: 1, fixturesAhead: 6 }, cfgR);
+    expect(fit.pStart).toBeLessThanOrEqual(0.95);
+    expect(doubtful.pStart).toBeLessThan(fit.pStart);
   });
 });

@@ -42,6 +42,8 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     windows: [1, 3, 5, 10, 38],
     min_minutes_for_rate: 450,
     shrinkage_k: 6,
+    shrinkage_k_attacking: 10, // xG/xA stabilise slower than volume stats
+
     decay_xi_player: 0.01,
     new_season_alpha_k: 8,
     championship_attack_mult: 0.6,
@@ -83,6 +85,48 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
   },
   // L4 attacking production
   attacking: { finishing_clip: [0.85, 1.15], finishing_min_minutes: 2500, assist_conv: 1.05, pen_goal_prob: 0.76 },
+  // ── statengineexpansion.md (v1.3.0) — new keys seed on upgrade ──────────
+  // X1 minutes realism: E[min|start] from the player's own started matches
+  minutes_realism: {
+    started_min_shrink_k: 4, // matches of trust before the player's own number dominates
+    e_min_start_cap: { GK: 90, DEF: 89, MID: 86, FWD: 86 },
+    top_start_share_p: 0.95, // an every-week starter, not 0.93
+    horizon_target_mult: 0.92, // X8: horizon target = own long-run start share × this
+  },
+  // X7 price-continuous attacking prior: FPL price is the market's published
+  // expected-returns prior — shrink a £6.0 and a £15.5 forward toward
+  // DIFFERENT targets (attacking rates only; volume stats keep band priors)
+  price_prior: {
+    elasticity: 0.9,
+    mult_range: [0.5, 2.2],
+    ref_price: { GK: 50, DEF: 50, MID: 65, FWD: 75 }, // tenths
+    xg90_at_ref: { GK: 0.005, DEF: 0.08, MID: 0.16, FWD: 0.4 },
+    xa90_at_ref: { GK: 0.005, DEF: 0.08, MID: 0.16, FWD: 0.12 },
+  },
+  // X2 set-piece & penalty expected value (plan §4.5, delivered)
+  set_piece_ev: {
+    team_pens_per_match: 0.28,
+    taker_share: { 1: 0.85, 2: 0.1 },
+    pen_conversion: 0.76,
+    // order-1 takers: pens are already inside historical xG. Must equal what
+    // the explicit pen term re-adds (team_pens × share × xG-per-pen ≈ 0.181),
+    // or incumbent takers get their penalties counted twice.
+    pen_xg_deduction: 0.181,
+    corner_dfk_xa_bump: 0.04,
+  },
+  // X3 bonus rides returns, not averages (constants refit each season)
+  bonus_model: {
+    fwd_mid: { base: 0.1, slope: 1.15, cap: 2.5 },
+    def: { base: 0.12, slope: 1.05, cs_term: 0.9, cap: 2.5 },
+    gk: { base: 0.08, cs_term: 0.8, saves_norm: 3.5, cap: 2.0 },
+  },
+  // X4 gentler in-season decay for per-90 rates (half-life ~140 football-days)
+  feature_decay: { rate_xi_per_day: 0.005 },
+  // X5 human factors — bounded, structured; the AI pass stays the free-text channel
+  human_factors: {
+    ownership_momentum_weight: 0.04, // w7 in stat_score
+    suspension_tightrope: { yellows: 4, haircut_next3: 0.96, haircut_next6: 0.93 },
+  },
   // L5 DEFCON
   defcon: { window_matches: 15, mult_range: [0.8, 1.25] },
   // L7 bonus v1 empirical profile table (expected bonus given event profile)
