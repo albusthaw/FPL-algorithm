@@ -19,6 +19,10 @@ LOG_DIR="${LOG_DIR:-/var/log/${APP_NAME}}"
 NODE_MIN_MAJOR=22
 PG_PIN_MAJOR="${PG_PIN_MAJOR:-16}"
 NO_SYSTEMD="${NO_SYSTEMD:-auto}"   # auto|true|false — rehearsals run without systemd
+NO_NGINX="${NO_NGINX:-auto}"       # auto|true|false — auto skips nginx when systemd is absent
+SITE_DOMAIN_DEFAULT="fpl.minthantthaw.me"
+SITE_DOMAIN="${SITE_DOMAIN:-}"     # resolved by prompt_site_domain / read from shared/.env
+CRED_FILE="${APP_DIR}/shared/credentials.txt"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 mkdir -p "${LOG_DIR}" 2>/dev/null || LOG_DIR="${TMPDIR:-/tmp}/${APP_NAME}-logs" && mkdir -p "${LOG_DIR}"
@@ -128,8 +132,10 @@ service_start() {
   else
     # absolute path: service_stop's pkill matches on it — a relative path
     # would leave the old server holding the port across an upgrade flip
+    # 3>&- + </dev/null: the daemon must NOT inherit the console fd or stdin —
+    # a held fd 3 keeps pipelines reading install/upgrade output open forever
     (ENV_FILE="${APP_DIR}/shared/.env" nohup node "${APP_DIR}/current/backend/dist/src/server.js" \
-      >>"${APP_DIR}/shared/data/logs/server.log" 2>&1 &)
+      >>"${APP_DIR}/shared/data/logs/server.log" 2>&1 3>&- </dev/null &)
   fi
 }
 
@@ -145,6 +151,103 @@ health_check() { # health_check EXPECTED_VERSION [TIMEOUT_S]
   done
   echo "health check failed after ${timeout}s: ${body:-no response}"
   return 1
+}
+
+# ── site domain ────────────────────────────────────────────────────────────
+have_nginx() {
+  case "${NO_NGINX}" in
+    true) return 1 ;;
+    false) command -v nginx >/dev/null 2>&1 ;;
+    *) have_systemd && command -v nginx >/dev/null 2>&1 ;;
+  esac
+}
+
+# Resolve SITE_DOMAIN: an already-configured domain (shared/.env) is the
+# default; otherwise fpl.minthantthaw.me. On a TTY the user is asked whether
+# to keep it or type another; non-interactive runs take the default silently.
+valid_domain() { # hostname chars only — also keeps sed/nginx interpolation safe
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
+}
+
+prompt_site_domain() {
+  local current=""
+  [ -f "${APP_DIR}/shared/.env" ] && current="$(read_env_var SITE_DOMAIN "${APP_DIR}/shared/.env")"
+  local default="${SITE_DOMAIN:-${current:-${SITE_DOMAIN_DEFAULT}}}"
+  valid_domain "${default}" || default="${SITE_DOMAIN_DEFAULT}"
+  if [ -t 0 ] && [ "${NONINTERACTIVE:-false}" != "true" ]; then
+    while true; do
+      printf '%b' "  Site domain [${C_GREEN}${default}${C_OFF}] — press Enter to keep, or type another: " >&3
+      local answer=""
+      read -r answer || answer=""
+      SITE_DOMAIN="${answer:-${default}}"
+      valid_domain "${SITE_DOMAIN}" && break
+      console "  ${C_RED}'${SITE_DOMAIN}' is not a valid domain (letters, digits, dots, hyphens)${C_OFF}"
+    done
+  else
+    SITE_DOMAIN="${default}"
+    if ! valid_domain "${SITE_DOMAIN}"; then
+      console "  ${C_RED}SITE_DOMAIN '${SITE_DOMAIN}' is not a valid domain${C_OFF}"
+      exit 1
+    fi
+  fi
+  echo "site domain resolved: ${SITE_DOMAIN}"
+}
+
+# Read the domain of an EXISTING install without prompting (upgrade.sh —
+# upgrades detect the installed site and never change it).
+detect_site_domain() {
+  SITE_DOMAIN="$(read_env_var SITE_DOMAIN "${APP_DIR}/shared/.env")"
+}
+
+site_url() {
+  if [ -n "${SITE_DOMAIN}" ]; then echo "http://${SITE_DOMAIN}"; else echo "http://127.0.0.1:${APP_PORT}"; fi
+}
+
+# ── credentials file: written when an admin is CREATED; upgrades never touch ─
+save_credentials() { # save_credentials EMAIL PASSWORD
+  (
+  umask 077
+  cat > "${CRED_FILE}" <<CREDEOF
+# ${APP_NAME} sign-in credentials — created $(date -Iseconds) by $(basename "$0")
+# Keep this file private (chmod 600). If you change the password in the
+# admin panel later, this file is NOT updated — delete it once memorised.
+site url:       $(site_url)
+local url:      http://127.0.0.1:${APP_PORT}
+admin email:    $1
+admin password: $2
+db name:        ${DB_NAME}
+db user:        ${DB_USER}
+db password:    see DB_PASSWORD in ${APP_DIR}/shared/.env
+CREDEOF
+  )
+  chmod 600 "${CRED_FILE}"
+  echo "credentials saved to ${CRED_FILE}"
+}
+
+cred_field() { # cred_field "admin email" → value from the credentials file
+  # `|| true`: a missing file must not trip set -e/pipefail — callers handle ""
+  sed -n "s/^$1:[[:space:]]*//p" "${CRED_FILE}" 2>/dev/null | head -1 || true
+}
+
+# Print the sign-in block to the console AND note the file location — used
+# by all three scripts so credentials are always shown at the end.
+show_signin_block() { # show_signin_block [note]
+  local email password
+  email="$(cred_field 'admin email')"
+  password="$(cred_field 'admin password')"
+  console ""
+  console "  ${C_GREEN}── SIGN-IN ─────────────────────────────────────────${C_OFF}"
+  console "  URL:      $(site_url)  (local: http://127.0.0.1:${APP_PORT})"
+  if [ -n "${email}" ]; then
+    console "  Email:    ${email}"
+    console "  Password: ${password}"
+    console "  Saved in: ${CRED_FILE}"
+  else
+    console "  Email/password: unchanged — ${CRED_FILE} not found"
+    console "  (created before v1.0.2, or deleted after memorising)"
+  fi
+  [ -n "${1:-}" ] && console "  ${C_DIM}$1${C_OFF}"
+  console "  ${C_GREEN}────────────────────────────────────────────────────${C_OFF}"
 }
 
 find_payload() { # locates payload/ next to the running script

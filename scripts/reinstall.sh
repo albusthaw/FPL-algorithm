@@ -37,6 +37,9 @@ if [ "${PURGE}" = "true" ]; then
 else
   console "  Reinstall (safe mode): the existing database will be PARKED"
   console "  (renamed ${DB_NAME}_parked_${TIMESTAMP}) and shared/ kept."
+  console "  A NEW admin + credentials file will be created for the fresh"
+  console "  database and shown at the end. The site domain keeps its"
+  console "  configured value by default (you'll be asked)."
   console "  Use --purge for a destructive wipe (typed confirmation required)."
   run_step "stop service" service_stop
 fi

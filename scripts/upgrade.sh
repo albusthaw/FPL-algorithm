@@ -17,6 +17,37 @@ DB_PASSWORD="$(read_env_var DB_PASSWORD "${APP_DIR}/shared/.env")"
 export PGPASSWORD="${DB_PASSWORD}"
 PGARGS=(-h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}")
 
+# ── detect the installed site + credentials — upgrades NEVER change either.
+# Snapshot both so the end of the run can PROVE they are untouched.
+detect_site_domain
+SITE_BEFORE="${SITE_DOMAIN}"
+cred_hash() { sha256sum "${CRED_FILE}" 2>/dev/null | cut -d' ' -f1 || true; }
+CRED_HASH_BEFORE="$(cred_hash)"
+
+assert_site_and_creds_unchanged() {
+  local site_after cred_after
+  site_after="$(read_env_var SITE_DOMAIN "${APP_DIR}/shared/.env")"
+  cred_after="$(cred_hash)"
+  if [ "${site_after}" != "${SITE_BEFORE}" ]; then
+    echo "GUARD TRIPPED: SITE_DOMAIN changed '${SITE_BEFORE}' → '${site_after}' during upgrade"
+    return 1
+  fi
+  if [ "${cred_after}" != "${CRED_HASH_BEFORE}" ]; then
+    echo "GUARD TRIPPED: ${CRED_FILE} changed during upgrade"
+    return 1
+  fi
+  # nginx server block (when present) must still carry the installed domain
+  if [ -n "${SITE_BEFORE}" ]; then
+    local conf
+    for conf in "/etc/nginx/sites-available/${APP_NAME}.conf" "/etc/nginx/conf.d/${APP_NAME}.conf"; do
+      if [ -f "${conf}" ] && ! grep -q "server_name ${SITE_BEFORE};" "${conf}"; then
+        echo "WARNING: ${conf} no longer names ${SITE_BEFORE} — not touching it (upgrades never modify the site)"
+      fi
+    done
+  fi
+  echo "site + credentials verified unchanged (site: ${SITE_BEFORE:-not configured}; creds: ${CRED_HASH_BEFORE:-no file})"
+}
+
 restore_db_from() { # restore_db_from DUMP — nuke-then-restore (§5: the only restore that always works)
   local dump="$1"
   echo "restoring database from ${dump} (drop-all first)"
@@ -67,7 +98,12 @@ if [ "${1:-}" = "--rollback" ]; then
   run_step "flip current → ${PREV_VERSION}" do_flip
   run_step "start service" service_start
   run_step "health check (v${PREV_VERSION})" health_check "${PREV_VERSION}"
-  summary_box "ROLLED BACK to v${PREV_VERSION}" "database restored from:" "  $(basename "$(dirname "${DUMP}")")/dump.sqlc"
+  run_step "verify site + credentials unchanged" assert_site_and_creds_unchanged
+  summary_box "ROLLED BACK to v${PREV_VERSION}" \
+    "site:  $(site_url) (unchanged)" \
+    "database restored from:" \
+    "  $(basename "$(dirname "${DUMP}")")/dump.sqlc"
+  show_signin_block "Rollback restored the database from the pre-upgrade dump — sign-in unchanged."
   exit 0
 fi
 
@@ -89,6 +125,7 @@ OLD_SCHEMA="$(json_field "${APP_DIR}/current/version.json" schema)"
 
 console ""
 console "  Upgrading ${APP_NAME}: v${OLD_VERSION} (schema ${OLD_SCHEMA}) → v${NEW_VERSION} (schema ${NEW_SCHEMA})"
+console "  Installed site: ${SITE_BEFORE:-not configured} ${C_DIM}(detected — upgrades never change the site)${C_OFF}"
 console ""
 
 preflight() {
@@ -174,9 +211,14 @@ prune() {
 }
 run_step "prune old releases (keep 3)" prune
 
+# the guard: prove the installed site and sign-in credentials are untouched
+run_step "verify site + credentials unchanged" assert_site_and_creds_unchanged
+
 trap - ERR
 summary_box "UPGRADED ${APP_NAME} v${OLD_VERSION} → v${NEW_VERSION}" \
+  "site:    $(site_url) (unchanged)" \
   "schema:  ${OLD_SCHEMA} → ${NEW_SCHEMA}" \
   "backup:  backups/${TIMESTAMP}/dump.sqlc (verified)" \
   "rollback: bash upgrade.sh --rollback"
+show_signin_block "Unchanged by this upgrade — upgrade.sh never modifies users or the site."
 console ""

@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.0.2 — 2026-08-20 · schema 8
+
+No migration (scripts-only release).
+
+- Site domain: install.sh/reinstall.sh default to `fpl.minthantthaw.me` with
+  a keep-or-change prompt (non-interactive runs take the default silently);
+  the choice is stored as `SITE_DOMAIN` in `shared/.env` and an nginx server
+  block is written (skipped gracefully without nginx/systemd).
+- upgrade.sh detects the installed site from `shared/.env` and never changes
+  it — an end-of-run guard (`verify site + credentials unchanged`) proves
+  `SITE_DOMAIN`, `shared/credentials.txt`, and the nginx config are
+  untouched, on the upgrade path and the --rollback path alike.
+- Admin credentials: created once by install.sh, saved to
+  `shared/credentials.txt` (chmod 600) and displayed in a SIGN-IN block at
+  the end of install.sh, upgrade.sh, and reinstall.sh. Upgrades never modify
+  users; reruns of install.sh keep the existing admin and credentials file.
+- rehearse-upgrade.sh now also asserts: default domain written, credentials
+  file created and its credentials actually log in, second install leaves
+  credentials unchanged, and upgrades preserve site + credentials
+  byte-for-byte.
+
 ## v1.0.1 — 2026-08-20 · schema 8
 
 - Migration 0008: hot-path indexes (news recency, verdict cache by player,
