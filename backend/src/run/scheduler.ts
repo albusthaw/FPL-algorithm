@@ -196,6 +196,21 @@ export function startScheduler(db: Knex): void {
         const { mapApiFootballFixtures } = await import('../ingest/adapters/api-football.js');
         return mapApiFootballFixtures(db, season);
       });
+      // A1 (v1.4.5): odds snapshots for the next event's mapped fixtures —
+      // one request per fixture, entitlement-gated (paid scope on free)
+      const nextGw = await db('gameweeks').where('is_next', true).first('id');
+      if (nextGw) {
+        const fxs = (await db('fixtures')
+          .where('event', Number(nextGw.id))
+          .whereNotNull('fpl_fixture_id')
+          .select('fixture_uid', 'stats')) as { fixture_uid: string; stats: { af_id?: number } | null }[];
+        const { pullOdds } = await import('../ingest/adapters/api-football.js');
+        for (const fx of fxs) {
+          if (!fx.stats?.af_id) continue;
+          const r = await guardedPull(db, 'api_football', 'odds', fx.fixture_uid, () => pullOdds(db, fx.fixture_uid, fx.stats!.af_id!));
+          if (r === null) break; // refused/learned — stop the sweep
+        }
+      }
     } catch (err) {
       log.warn({ err: String(err) }, 'fixture-id mapping failed');
     }
@@ -239,6 +254,19 @@ export function startScheduler(db: Knex): void {
       await cachePlayerPhotos(db);
     } catch (err) {
       log.warn({ err: String(err) }, 'photo cache pass failed');
+    }
+    // B4 (v1.4.5): TSDB context — venue/thumb per next-event fixture +
+    // all-competitions team calendars (external congestion, S8/M6)
+    try {
+      const enabled = await db('api_providers').where({ key: 'thesportsdb', enabled: true }).first('key');
+      if (enabled) {
+        const { guardedPull } = await import('../ingest/gateway.js');
+        const { pullTheSportsDbFixtureMeta, pullTheSportsDbTeamCalendars } = await import('../ingest/adapters/misc-providers.js');
+        await guardedPull(db, 'thesportsdb', 'eventsround', 'daily', () => pullTheSportsDbFixtureMeta(db));
+        await guardedPull(db, 'thesportsdb', 'eventsnext', 'daily', () => pullTheSportsDbTeamCalendars(db));
+      }
+    } catch (err) {
+      log.warn({ err: String(err) }, 'TSDB context pass failed');
     }
   });
 

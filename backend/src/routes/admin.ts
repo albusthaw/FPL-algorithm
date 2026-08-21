@@ -493,6 +493,60 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     return { started: true, depth: depthCfg };
   });
 
+  // ── A4 (v1.4.5): backtest & calibration harness
+  const backtestState = { running: false as boolean, last: null as unknown };
+  app.post('/api/admin/backtest', async (req, reply) => {
+    requireAdmin(req);
+    if (backtestState.running) return reply.code(409).send({ error: 'a backtest is already running' });
+    backtestState.running = true;
+    const { walkForwardBacktest } = await import('../stats/backtest.js');
+    // human-triggered, statistical only; results land in model_errors + runs
+    void walkForwardBacktest(db, { triggeredBy: req.user.id })
+      .then((m) => {
+        backtestState.last = m;
+      })
+      .catch((err) => log.error({ err: String(err) }, 'backtest failed'))
+      .finally(() => {
+        backtestState.running = false;
+      });
+    return { started: true };
+  });
+
+  app.post('/api/admin/refit', async (req, reply) => {
+    requireAdmin(req);
+    if (backtestState.running) return reply.code(409).send({ error: 'a backtest is already running' });
+    backtestState.running = true;
+    const { refitConstants } = await import('../stats/backtest.js');
+    void refitConstants(db, { triggeredBy: req.user.id })
+      .then((r) => {
+        backtestState.last = r;
+      })
+      .catch((err) => log.error({ err: String(err) }, 'refit failed'))
+      .finally(() => {
+        backtestState.running = false;
+      });
+    return { started: true };
+  });
+
+  app.get('/api/admin/backtest', async (req) => {
+    requireAdmin(req);
+    const runs = await db('runs').where('kind', 'backtest').orderBy('id', 'desc').limit(10).select('id', 'status', 'stages', 'started_at', 'finished_at');
+    const latest = runs[0];
+    let calibration: unknown = null;
+    if (latest) {
+      // calibration curve: predicted-xPts buckets vs realised mean points
+      const rows = (await db('model_errors')
+        .where('run_id', latest.id)
+        .select(db.raw(`width_bucket(xpts_pred, 0, 12, 12) AS bucket`))
+        .avg({ pred: 'xpts_pred', actual: 'points_actual' })
+        .count({ n: '*' })
+        .groupBy('bucket')
+        .orderBy('bucket')) as { bucket: number; pred: string; actual: string; n: string }[];
+      calibration = rows.map((r) => ({ bucket: Number(r.bucket), pred: Number(r.pred), actual: Number(r.actual), n: Number(r.n) }));
+    }
+    return { running: backtestState.running, lastResult: backtestState.last, runs, calibration };
+  });
+
   // ── data-coverage audit (statengineexpansion.md X6): proves every active
   //    player is ingested, scored and reflected in the latest rankings
   app.get('/api/admin/data-coverage', async (req) => {

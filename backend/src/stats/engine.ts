@@ -58,6 +58,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     news_signals?: import('../news/signals.js').NewsSignalsConfig;
   }>(db, 'human_factors').catch(() => null);
   const priceModel = await getConfig<PriceModelConfig>(db, 'price_model').catch(() => null);
+  const l2Market = await getConfig<{ w_ep_next: number }>(db, 'l2_market').catch(() => null);
   const configVersion = await getConfigVersion(db, 'stat_score_weights');
 
   // ── events: the next 8 upcoming events as-of now
@@ -247,7 +248,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
   const allStats = await db('player_match_stats')
     .whereNotNull('kickoff_utc')
     .where('kickoff_utc', '<', asOf)
-    .select('player_uid', 'kickoff_utc', 'minutes', 'starts', 'goals', 'assists', 'saves', 'cbit', 'cbirt', 'defcon_count', 'xg', 'npxg', 'xa', 'fpl_points', 'yc', 'rc', 'was_home');
+    .select('player_uid', 'kickoff_utc', 'minutes', 'starts', 'goals', 'assists', 'saves', 'conceded', 'cbit', 'cbirt', 'defcon_count', 'xg', 'npxg', 'xa', 'fpl_points', 'yc', 'rc', 'was_home');
   const rowsByPlayer = new Map<string, MatchRow[]>();
   for (const r of allStats) {
     const row: MatchRow = {
@@ -267,6 +268,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       yc: r.yc,
       rc: r.rc,
       wasHome: r.was_home, // A6: venue splits
+      conceded: r.conceded, // A7: GK save rate
     };
     const list = rowsByPlayer.get(r.player_uid);
     if (list) list.push(row);
@@ -330,6 +332,17 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     lineupByFixtureTeam.set(`${l.fixture_uid}|${l.team_uid}`, { starters: l.starters ?? [], bench: l.bench ?? [] });
   }
 
+  // A5 (v1.4.5): refresh opponent-style DEFCON multipliers and load them —
+  // the composer input existed since day one with nothing feeding it (S4)
+  let styleMults = new Map<string, number>();
+  try {
+    const { writeTeamStyleStats, loadTeamStyleMults } = await import('./team-style.js');
+    await writeTeamStyleStats(db);
+    styleMults = await loadTeamStyleMults(db);
+  } catch (err) {
+    log.warn({ err: String(err) }, 'team-style pass failed — DEFCON opponent multiplier stays neutral');
+  }
+
   // A3 (v1.4.4): reconciled availability per (player, fixture) — the merged
   // FPL-flags + injuries + news truth caps the chance the minutes model sees
   const availRows = (await db('availability_state')
@@ -348,6 +361,13 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
     (fixturesByTeam.get(f.homeTeamUid) ?? fixturesByTeam.set(f.homeTeamUid, []).get(f.homeTeamUid)!).push(f);
     (fixturesByTeam.get(f.awayTeamUid) ?? fixturesByTeam.set(f.awayTeamUid, []).get(f.awayTeamUid)!).push(f);
   }
+  // B4 (v1.4.5, audit S8): EXTERNAL congestion — UCL/Europa/cup dates from
+  // the all-competitions calendars (teams.strength.ext_fixtures)
+  const extFixturesByTeam = new Map<string, number[]>(
+    ((await db('teams').whereNotNull('fpl_id').select('uid', 'strength')) as { uid: string; strength: { ext_fixtures?: string[] } | null }[]).map(
+      (t) => [t.uid, (t.strength?.ext_fixtures ?? []).map((d) => new Date(d).getTime()).filter((x) => Number.isFinite(x))],
+    ),
+  );
 
   const fxPredByUid = new Map(fxPreds.map((p) => [p.fixture.fixtureUid, p]));
   const nextEvent = upcomingEvents[0]!;
@@ -396,12 +416,20 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       decayXi: featureDecay?.rate_xi_per_day ?? Number(ffCfg.decay_xi_player ?? 0.01),
     });
 
-    // finishing-skill multiplier (bounded, proven finishers only)
+    // finishing-skill multiplier (bounded, proven finishers only).
+    // A8 (v1.4.5, audit S7): penalty-aware — raw goals/xG inflated takers
+    // (pens convert at ~0.79 of ~0.79 xG each, pure noise for "finishing").
+    // With npxg data: non-pen goals ≈ goals − pen-xG, over npxG.
     let finishingMult = 1;
     if (features.minutesTotal >= attackingCfg.finishing_min_minutes && features.rawXg90 > 0.05) {
       const careerGoals = rows.reduce((s, r) => s + r.goals, 0);
       const careerXg = rows.reduce((s, r) => s + (r.xg ?? 0), 0);
-      if (careerXg > 3) {
+      const careerNpxg = rows.reduce((s, r) => s + (r.npxg ?? r.xg ?? 0), 0);
+      const sawNpxg = rows.some((r) => r.npxg != null);
+      if (sawNpxg && careerNpxg > 3) {
+        const penXg = Math.max(0, careerXg - careerNpxg); // ≈ expected pen goals
+        finishingMult = Math.min(attackingCfg.finishing_clip[1], Math.max(attackingCfg.finishing_clip[0], (careerGoals - penXg) / careerNpxg));
+      } else if (careerXg > 3) {
         finishingMult = Math.min(attackingCfg.finishing_clip[1], Math.max(attackingCfg.finishing_clip[0], careerGoals / careerXg));
       }
     }
@@ -445,14 +473,18 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
             : ('absent' as const)
         : null;
 
-      // congestion: another club fixture within 4 days
-      const congested = teamFixtures.some(
-        (other) =>
-          other !== f &&
-          other.kickoff != null &&
-          f.kickoff != null &&
-          Math.abs(other.kickoff.getTime() - f.kickoff.getTime()) < 4 * 86_400_000,
-      );
+      // congestion: another club fixture within 4 days — PL or EXTERNAL
+      // (UCL/Europa/cup from the all-competitions calendars, S8)
+      const congested =
+        teamFixtures.some(
+          (other) =>
+            other !== f &&
+            other.kickoff != null &&
+            f.kickoff != null &&
+            Math.abs(other.kickoff.getTime() - f.kickoff.getTime()) < 4 * 86_400_000,
+        ) ||
+        (f.kickoff != null &&
+          (extFixturesByTeam.get(p.team_uid) ?? []).some((t) => Math.abs(t - f.kickoff!.getTime()) < 4 * 86_400_000));
 
       // A3: the reconciled availability row (if any) caps the FPL chance flag
       const avail = availBy.get(`${p.uid}|${f.fixtureUid}`);
@@ -495,9 +527,12 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
           npxg90: features.npxg90,
           xa90: features.xa90,
           saves90: features.saves90,
+          saveRate: features.saveRate, // A7: keeper skill differentiates
           yc90: features.yc90,
           rc90: features.rc90,
           defconHitRate: features.defconHitRate,
+          // A5: how many defensive contributions THIS opponent induces
+          defconOppMult: styleMults.get(isHome ? f.awayTeamUid : f.homeTeamUid) ?? 1,
           finishingMult,
           // A6 (v1.4.3): the player's own venue split scales the fixture's
           // team-level attack ratio (both bounded — a home specialist at
@@ -605,6 +640,12 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       }
     }
 
+    // A1 (v1.4.5): ep_next pseudo-market sanity blend — FPL's own published
+    // next-GW expectation anchors OUR next-1 number (⚙ l2_market.w_ep_next);
+    // it already prices availability and the market's information
+    const epNext = Number((p.season_stats as { ep_next?: unknown } | null)?.ep_next ?? 0) || 0;
+    const wEp = epNext > 0 ? (l2Market?.w_ep_next ?? 0.15) : 0;
+
     scored.push({
       uid: p.uid,
       position: p.position,
@@ -612,7 +653,7 @@ export async function runStatsEngine(db: Knex, runId: number, asOf: Date): Promi
       features,
       xptsPerEvent,
       humanSignals,
-      xptsN1: sumEvents(1) * signalMult.n1,
+      xptsN1: (1 - wEp) * sumEvents(1) * signalMult.n1 + wEp * epNext,
       xptsN3: sumEvents(3) * tightrope3 * signalMult.n3,
       xptsN6: sumEvents(6) * tightrope6 * signalMult.n6,
       pStartNext,

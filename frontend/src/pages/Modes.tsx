@@ -113,7 +113,7 @@ export function InitialModePage(): ReactNode {
   const [banned, setBanned] = useState<string[]>([]);
   const [compareTeamId, setCompareTeamId] = useState<number | null>(null);
   const [teams, setTeams] = useState<{ id: number; name: string }[]>([]);
-  const [result, setResult] = useState<{ runId: number; squad: Card[]; xi: XiPayload; totalCost: number; method: string; diff: { out: Card[]; in: Card[]; deltaXpts: number; deltaBudget: number } | null } | null>(null);
+  const [result, setResult] = useState<{ runId: number; squad: Card[]; xi: XiPayload; band: { p10: number; p90: number } | null; totalCost: number; method: string; diff: { out: Card[]; in: Card[]; deltaXpts: number; deltaBudget: number } | null } | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [pickerSearch, setPickerSearch] = useState('');
@@ -212,6 +212,12 @@ export function InitialModePage(): ReactNode {
               <h4>Squad summary</h4>
               <div className="stat-row"><span>Formation</span><b>{result.xi.formation.slice(1).join('-')}</b></div>
               <div className="stat-row"><span>XI xPts (captain doubled)</span><b>{result.xi.xpts}</b></div>
+              {result.band && (
+                <div className="stat-row" data-testid="squad-band">
+                  <span>Simulated range (P10–P90)</span>
+                  <b className="mono">{result.band.p10} – {result.band.p90}</b>
+                </div>
+              )}
               <div className="stat-row"><span>Total cost</span><b>{fmtPrice(result.totalCost)}</b></div>
               <div className="stat-row"><span>In the bank</span><b>{fmtPrice(budget - result.totalCost)}</b></div>
               <div className="stat-row"><span>Solver</span><b>{result.method.toUpperCase()}</b></div>

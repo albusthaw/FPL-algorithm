@@ -41,6 +41,7 @@ export interface ComposeInput {
   npxg90?: number; // non-penalty rate — replaces the crude deduction for takers
   xa90: number;
   saves90: number;
+  saveRate?: number; // A7 (v1.4.5): the keeper's own shrunk save rate
   yc90: number;
   rc90: number;
   defconHitRate: number; // per played match at full exposure
@@ -157,8 +158,10 @@ export function composeXpts(input: ComposeInput, rules: ScoringRules, bonusProfi
   let eSaves = 0;
   let saves = 0;
   if (pos === 'GK') {
-    const eSotFaced = input.lambdaOpponent * SOT_PER_XG * (input.saves90 > 0 ? 1 : 1);
-    const saveRate = input.saves90 > 0 ? Math.min(0.85, Math.max(0.55, BIG_SAVE_RATE)) : BIG_SAVE_RATE;
+    const eSotFaced = input.lambdaOpponent * SOT_PER_XG;
+    // A7 (v1.4.5, audit S12): the old `saves90 > 0 ? 1 : 1` no-op froze every
+    // keeper at the league mean — the shrunk personal rate differentiates now
+    const saveRate = Math.min(0.85, Math.max(0.55, input.saveRate ?? BIG_SAVE_RATE));
     eSaves = Math.min(9, eSotFaced * saveRate * (input.eMin / 90));
     saves = expectedSavePoints(eSaves, rules.saves_per_point) + /* pen save EV */ 0.02 * rules.penalty_save * (input.eMin / 90);
   }

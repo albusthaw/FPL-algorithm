@@ -77,6 +77,26 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
       };
     }
 
+    // A7 (v1.4.5): the squad's simulated band — per-player P10/P90 from the
+    // matrix combined as independent sigmas (captain doubled), so the XI
+    // shows a floor and a ceiling, not just a mean
+    let band: { p10: number; p90: number } | null = null;
+    const qRows = (await db('player_matrix')
+      .where('run_id', runId)
+      .whereIn('player_uid', solution.xi.starters.map((p) => p.uid))
+      .whereNotNull('p90')
+      .select('player_uid', 'p10', 'p50', 'p90')) as { player_uid: string; p10: string; p50: string; p90: string }[];
+    if (qRows.length === solution.xi.starters.length) {
+      let varSum = 0;
+      for (const r of qRows) {
+        const mult = r.player_uid === solution.xi.captain ? 2 : 1;
+        const sigma = (mult * (Number(r.p90) - Number(r.p10))) / 2.56;
+        varSum += sigma * sigma;
+      }
+      const spread = 1.28 * Math.sqrt(varSum);
+      band = { p10: Number((solution.xi.xptsTotal - spread).toFixed(1)), p90: Number((solution.xi.xptsTotal + spread).toFixed(1)) };
+    }
+
     return {
       runId,
       squad: squadCards,
@@ -88,6 +108,7 @@ export async function modeRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
         vice: solution.xi.vice,
         xpts: Number(solution.xi.xptsTotal.toFixed(2)),
       },
+      band,
       totalCost: solution.totalCost,
       method: solution.method,
       diff,

@@ -25,6 +25,7 @@ export interface MatchRow {
   shots?: number | null;
   keyPasses?: number | null;
   wasHome?: boolean | null; // A6 (v1.4.3): venue splits
+  conceded?: number; // A7 (v1.4.5): GK save-rate = saves/(saves+conceded)
 }
 
 export interface PlayerFeatures {
@@ -53,6 +54,9 @@ export interface PlayerFeatures {
   // home, small samples stay neutral
   venueAttMultHome: number;
   venueAttMultAway: number;
+  // A7 (v1.4.5, audit S12): the keeper's OWN save rate saves/(saves+conceded),
+  // shrunk toward the league's ~0.70 — keeper quality is a persistent skill
+  saveRate: number;
 }
 
 export interface PositionPriors {
@@ -151,6 +155,7 @@ export function computePlayerFeatures(
       daysSinceLastMatch: null,
       venueAttMultHome: 1,
       venueAttMultAway: 1,
+      saveRate: 0.7,
     };
   }
 
@@ -271,7 +276,17 @@ export function computePlayerFeatures(
     return Math.min(1.15, Math.max(0.85, shrunk));
   };
 
+  // A7 (v1.4.5): save rate saves/(saves+conceded), shrunk toward 0.70 by
+  // shots faced (a 5-shot sample says nothing; 100 shots is a real skill)
+  const totSaves = window.reduce((s, r) => s + r.saves, 0);
+  const totConceded = window.reduce((s, r) => s + (r.conceded ?? 0), 0);
+  const shotsFaced = totSaves + totConceded;
+  const K_SAVE_SHOTS = 40;
+  const rawSaveRate = shotsFaced > 0 ? totSaves / shotsFaced : 0.7;
+  const saveRate = Math.min(0.85, Math.max(0.55, (shotsFaced * rawSaveRate + K_SAVE_SHOTS * 0.7) / (shotsFaced + K_SAVE_SHOTS)));
+
   return {
+    saveRate,
     venueAttMultHome: venueMult(true),
     venueAttMultAway: venueMult(false),
     matchesUsed: window.length,

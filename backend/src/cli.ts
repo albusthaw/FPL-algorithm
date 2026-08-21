@@ -65,8 +65,22 @@ async function main(): Promise<void> {
       log.info({ players: boot.players, teams: boot.teams, events: boot.events, fixtures: fx.fixtures }, 'FPL sync complete');
       break;
     }
+    case 'backtest': {
+      // A4 (v1.4.5): walk-forward over the imported seasons → model_errors
+      const { walkForwardBacktest } = await import('./stats/backtest.js');
+      const metrics = await walkForwardBacktest(db, { seasons: args[0] ? [args[0]] : undefined });
+      console.log(JSON.stringify(metrics, null, 2));
+      break;
+    }
+    case 'refit': {
+      // A4: grid refit decayXi × kAtt — improvements land as config versions
+      const { refitConstants } = await import('./stats/backtest.js');
+      const result = await refitConstants(db);
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
     default:
-      console.error('usage: cli <migrate|status|guard|create-admin|sync-fpl>');
+      console.error('usage: cli <migrate|status|guard|create-admin|sync-fpl|backtest|refit>');
       process.exit(2);
   }
   await db.destroy();

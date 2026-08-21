@@ -185,6 +185,8 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
   // v1.4.2 P1: selected subscription tier per provider (snapshot of the
   // chosen PlanTier from ingest/plans.ts); admin plan selector writes here
   provider_plans: DEFAULT_PROVIDER_PLANS,
+  // A1 (v1.4.5): ep_next pseudo-market blend weight for the next-1 horizon
+  l2_market: { w_ep_next: 0.15 },
   // A2 (v1.4.4): ownership-scaled price-change threshold model — θ_base is
   // refit nightly by calibratePriceModel as new config versions
   price_model: {
@@ -219,6 +221,9 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     swing_threshold: 2.0,
     chip_urgency_events: 4,
     wc_horizon_events: 6,
+    // B6 (v1.4.5): share of the best-XI gap a wildcard realistically
+    // captures per GW (was a hard-coded 0.35 — audit M5)
+    wc_realisation: 0.35,
   },
   // AI engine
   // P4 (v1.4.1): model-capability registry — parameter drift is DATA.

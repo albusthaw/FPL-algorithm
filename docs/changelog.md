@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.4.5 — 2026-08-21 · schema 14
+
+Migration 0014 (`player_matrix.p10/p50/p90` + `team_style_stats.stats`).
+engineupgradeplus.md release 5 — "the calibrated engine": the backtest loop
+that keeps every future engine change honest, plus the remaining model
+corrections.
+
+- **A4 — walk-forward backtest & calibration harness** (fixes S11: the
+  model_errors table shipped in 0004 and the loop was never built): replays
+  the imported seasons through the live engine's OWN pure functions
+  (fitTeamStrength → predictFromLambdas → computePlayerFeatures →
+  predictMinutes → composeXpts), strictly as-of each historical event's
+  first kickoff. Per-player errors land in `model_errors` under a
+  kind='backtest' run; aggregates (xPts MAE/RMSE per position, minutes MAE,
+  fixture 1X2 Brier) live on the run row. New Admin → Backtest tab
+  (run/refit buttons, metrics, calibration table predicted-vs-realised per
+  bucket, non-regression history) and `cli.js backtest|refit`.
+  `refitConstants` grid-searches decayXi × kAtt on a fast subsample and
+  writes improvements as NEW config versions — refits are data, never code.
+  Verified on a synthetic season: MAE 1.64, Brier 0.51 (uniform = 0.667).
+- **A5 — opponent-style DEFCON multiplier** (fixes S4): a per-team writer
+  computes how much defensive work each side INDUCES in its opponents
+  (opposing-player CBIRT per match over ⚙ defcon.window_matches, normalised
+  to the league, clamped to ⚙ mult_range) into `team_style_stats`; the
+  composer's long-dormant `defconOppMult` input is finally wired.
+- **A7 — distribution-true variance**: the captaincy sim generalised to
+  full quantiles — every player's next-event P10/P50/P90 now lands on the
+  matrix (floor/median/ceiling on the player page), and Initial XI shows a
+  simulated squad range (per-player sigmas combined, captain doubled).
+  While in there: the GK save model's `saves90 > 0 ? 1 : 1` no-op (S12) is
+  replaced by the keeper's OWN save rate saves/(saves+conceded), shrunk by
+  shots faced toward 0.70 and bounded; the simulator's `/3` save-points
+  literal now reads `rules.saves_per_point`, and its quiet-game bonus draw
+  matches the ⚙ bonus model's e_bonus in expectation (M7).
+- **A8 — penalty-aware finishing** (fixes S7): where npxG exists, finishing
+  skill = (goals − pen-xG) / npxG instead of goals / xG — a taker's
+  conversion no longer inflates his open-play multiplier. Falls back to the
+  old ratio when npxG never landed for a player.
+- **B6 — chip valuations corrected** (M4/M5/M9): every chip baseline is now
+  the XI the manager actually fields — best formation-valid XI with the
+  best captain DOUBLED (was an undoubled 15-man sum vs an undoubled
+  top-11); Bench Boost values the REAL bench (the XI complement under the
+  picked formation, not the 4 weakest squad members); the wildcard's
+  invented 0.35 realisation factor is ⚙ `match_engine.wc_realisation`.
+- **B4 — context enrichment** (S8/M6): TheSportsDB venue + thumbnail per
+  next-event fixture into fixtures.stats; per-team ALL-competitions
+  calendars (UCL/Europa/cup dates into teams.strength.ext_fixtures) feed
+  both the minutes model's congestion check and the match engine's
+  volatility flag — European midweeks were previously invisible.
+- **A1 — market blend**: daily odds snapshots for mapped next-event
+  fixtures (API-Football, entitlement-gated) and an `ep_next` pseudo-market
+  sanity term — FPL's own published next-GW expectation blends into our
+  next-1 number at ⚙ `l2_market.w_ep_next` (0.15).
+- Tests: 4 new (full backtest loop against a synthetic season incl.
+  model_errors rows + Brier beating uniform, style-multiplier ordering +
+  clamp, quantile monotonicity + ceiling, save-rate shrinkage).
+  165 backend tests green.
+
 ## v1.4.4 — 2026-08-21 · schema 13
 
 Migration 0013 (`live_event_stats`, `price_predictions`). engineupgradeplus.md

@@ -240,6 +240,12 @@ export function PlayerDetailPage(): ReactNode {
                 <div className="stat-row"><span>Expected points next 1 / 3 / 6</span><b>{n(matrix.xpts_next1 as string)} / {n(matrix.xpts_next3 as string)} / {n(matrix.xpts_next6 as string)}</b></div>
                 <div className="stat-row"><span>Start probability</span><b>{pct(matrix.p_start_xi as string)}</b></div>
                 <div className="stat-row"><span>xG / xA per 90 (adjusted)</span><b>{n(matrix.xg_per90 as string, 2)} / {n(matrix.xa_per90 as string, 2)}</b></div>
+                {matrix.p90 != null && (
+                  <div className="stat-row" data-testid="player-quantiles">
+                    <span>Next match floor / median / ceiling</span>
+                    <b className="mono">{n(matrix.p10 as string, 0)} / {n(matrix.p50 as string, 0)} / {n(matrix.p90 as string, 0)} pts</b>
+                  </div>
+                )}
                 <div className="stat-row"><span>Clean-sheet chance (next match)</span><b>{pct(matrix.xcs as string)}</b></div>
                 <div className="stat-row"><span>Rank overall / position</span><b>#{matrix.rank_overall} / #{matrix.rank_position}</b></div>
                 {(matrix.ai_rationale as string) && <p style={{ marginTop: 12, fontSize: '.85rem', color: '#B9C2D6', fontStyle: 'italic' }}>“{matrix.ai_rationale as string}”</p>}
