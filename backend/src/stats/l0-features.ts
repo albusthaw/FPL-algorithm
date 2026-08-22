@@ -24,6 +24,8 @@ export interface MatchRow {
   rc: number;
   shots?: number | null;
   keyPasses?: number | null;
+  wasHome?: boolean | null; // A6 (v1.4.3): venue splits
+  conceded?: number; // A7 (v1.4.5): GK save-rate = saves/(saves+conceded)
 }
 
 export interface PlayerFeatures {
@@ -47,6 +49,14 @@ export interface PlayerFeatures {
   rawXg90: number; // pre-shrinkage, for diagnostics
   rawXa90: number;
   daysSinceLastMatch: number | null;
+  // A6 (v1.4.3): attacking-output venue ratios (xGI/90 at venue ÷ overall),
+  // shrunk toward 1.0 and bounded — a real home specialist nudges up at
+  // home, small samples stay neutral
+  venueAttMultHome: number;
+  venueAttMultAway: number;
+  // A7 (v1.4.5, audit S12): the keeper's OWN save rate saves/(saves+conceded),
+  // shrunk toward the league's ~0.70 — keeper quality is a persistent skill
+  saveRate: number;
 }
 
 export interface PositionPriors {
@@ -143,6 +153,9 @@ export function computePlayerFeatures(
       rawXg90: 0,
       rawXa90: 0,
       daysSinceLastMatch: null,
+      venueAttMultHome: 1,
+      venueAttMultAway: 1,
+      saveRate: 0.7,
     };
   }
 
@@ -243,7 +256,39 @@ export function computePlayerFeatures(
 
   const lastMatch = past[past.length - 1]!;
 
+  // A6 (v1.4.3): venue splits — attacking output (xGI/90, goals+assists
+  // fallback) at each venue relative to overall, shrunk toward neutral by
+  // venue minutes so a 3-match "home specialist" stays ~1.0
+  const xgi90Of = (rows: MatchRow[]): { rate: number; matches: number } => {
+    const min = rows.reduce((s, r) => s + r.minutes, 0);
+    const val = rows.reduce((s, r) => s + (r.xg ?? r.goals) + (r.xa ?? r.assists), 0);
+    return { rate: min > 0 ? (90 * val) / min : 0, matches: min / 90 };
+  };
+  const overallXgi = xgi90Of(window);
+  const K_VENUE = 8; // effective matches toward neutral
+  const venueMult = (wantHome: boolean): number => {
+    if (overallXgi.rate <= 0.02) return 1; // keepers / no output — neutral
+    const rows = window.filter((r) => r.wasHome === wantHome);
+    const v = xgi90Of(rows);
+    if (v.matches < 1) return 1;
+    const raw = v.rate / overallXgi.rate;
+    const shrunk = (v.matches * raw + K_VENUE * 1) / (v.matches + K_VENUE);
+    return Math.min(1.15, Math.max(0.85, shrunk));
+  };
+
+  // A7 (v1.4.5): save rate saves/(saves+conceded), shrunk toward 0.70 by
+  // shots faced (a 5-shot sample says nothing; 100 shots is a real skill)
+  const totSaves = window.reduce((s, r) => s + r.saves, 0);
+  const totConceded = window.reduce((s, r) => s + (r.conceded ?? 0), 0);
+  const shotsFaced = totSaves + totConceded;
+  const K_SAVE_SHOTS = 40;
+  const rawSaveRate = shotsFaced > 0 ? totSaves / shotsFaced : 0.7;
+  const saveRate = Math.min(0.85, Math.max(0.55, (shotsFaced * rawSaveRate + K_SAVE_SHOTS * 0.7) / (shotsFaced + K_SAVE_SHOTS)));
+
   return {
+    saveRate,
+    venueAttMultHome: venueMult(true),
+    venueAttMultAway: venueMult(false),
     matchesUsed: window.length,
     minutesTotal: past.reduce((s, r) => s + r.minutes, 0),
     xg90: shrink(rawXg90, effMatches, priors.xg90, kAtt),

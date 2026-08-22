@@ -1,5 +1,278 @@
 # Changelog
 
+## v1.4.5 — 2026-08-21 · schema 14
+
+Migration 0014 (`player_matrix.p10/p50/p90` + `team_style_stats.stats`).
+engineupgradeplus.md release 5 — "the calibrated engine": the backtest loop
+that keeps every future engine change honest, plus the remaining model
+corrections.
+
+- **A4 — walk-forward backtest & calibration harness** (fixes S11: the
+  model_errors table shipped in 0004 and the loop was never built): replays
+  the imported seasons through the live engine's OWN pure functions
+  (fitTeamStrength → predictFromLambdas → computePlayerFeatures →
+  predictMinutes → composeXpts), strictly as-of each historical event's
+  first kickoff. Per-player errors land in `model_errors` under a
+  kind='backtest' run; aggregates (xPts MAE/RMSE per position, minutes MAE,
+  fixture 1X2 Brier) live on the run row. New Admin → Backtest tab
+  (run/refit buttons, metrics, calibration table predicted-vs-realised per
+  bucket, non-regression history) and `cli.js backtest|refit`.
+  `refitConstants` grid-searches decayXi × kAtt on a fast subsample and
+  writes improvements as NEW config versions — refits are data, never code.
+  Verified on a synthetic season: MAE 1.64, Brier 0.51 (uniform = 0.667).
+- **A5 — opponent-style DEFCON multiplier** (fixes S4): a per-team writer
+  computes how much defensive work each side INDUCES in its opponents
+  (opposing-player CBIRT per match over ⚙ defcon.window_matches, normalised
+  to the league, clamped to ⚙ mult_range) into `team_style_stats`; the
+  composer's long-dormant `defconOppMult` input is finally wired.
+- **A7 — distribution-true variance**: the captaincy sim generalised to
+  full quantiles — every player's next-event P10/P50/P90 now lands on the
+  matrix (floor/median/ceiling on the player page), and Initial XI shows a
+  simulated squad range (per-player sigmas combined, captain doubled).
+  While in there: the GK save model's `saves90 > 0 ? 1 : 1` no-op (S12) is
+  replaced by the keeper's OWN save rate saves/(saves+conceded), shrunk by
+  shots faced toward 0.70 and bounded; the simulator's `/3` save-points
+  literal now reads `rules.saves_per_point`, and its quiet-game bonus draw
+  matches the ⚙ bonus model's e_bonus in expectation (M7).
+- **A8 — penalty-aware finishing** (fixes S7): where npxG exists, finishing
+  skill = (goals − pen-xG) / npxG instead of goals / xG — a taker's
+  conversion no longer inflates his open-play multiplier. Falls back to the
+  old ratio when npxG never landed for a player.
+- **B6 — chip valuations corrected** (M4/M5/M9): every chip baseline is now
+  the XI the manager actually fields — best formation-valid XI with the
+  best captain DOUBLED (was an undoubled 15-man sum vs an undoubled
+  top-11); Bench Boost values the REAL bench (the XI complement under the
+  picked formation, not the 4 weakest squad members); the wildcard's
+  invented 0.35 realisation factor is ⚙ `match_engine.wc_realisation`.
+- **B4 — context enrichment** (S8/M6): TheSportsDB venue + thumbnail per
+  next-event fixture into fixtures.stats; per-team ALL-competitions
+  calendars (UCL/Europa/cup dates into teams.strength.ext_fixtures) feed
+  both the minutes model's congestion check and the match engine's
+  volatility flag — European midweeks were previously invisible.
+- **A1 — market blend**: daily odds snapshots for mapped next-event
+  fixtures (API-Football, entitlement-gated) and an `ep_next` pseudo-market
+  sanity term — FPL's own published next-GW expectation blends into our
+  next-1 number at ⚙ `l2_market.w_ep_next` (0.15).
+- Tests: 4 new (full backtest loop against a synthetic season incl.
+  model_errors rows + Brier beating uniform, style-multiplier ordering +
+  clamp, quantile monotonicity + ceiling, save-rate shrinkage).
+  165 backend tests green.
+- **Ship verification** (engineupgradeplus.md Part 6 gates): both gap-audit
+  Playwright specs hardened from soft-log to hard assertions — 30 PRESENT
+  lines green against the deployed app (only referee context, the dashboard
+  confirmed-XI chip and data-dependent timelines remain soft GAPs). Full
+  E2E suite 46/46 with the mock AI (OCR-first live parse included).
+  Found-and-fixed while hardening: both SSE endpoints buffered their
+  headers until the first heartbeat (EventSource.onopen waited ~15 s) — an
+  immediate `: connected` flush opens them instantly. Rehearsed: fresh
+  install + idempotent reinstall, and v1.4.0 → v1.4.5 (schema 10 → 14)
+  with user data / site / credentials / admin-entered API key surviving,
+  rollback to v1.4.0 and post-rollback re-upgrade.
+
+## v1.4.4 — 2026-08-21 · schema 13
+
+Migration 0013 (`live_event_stats`, `price_predictions`). engineupgradeplus.md
+release 4 — "the live gameweek": in-play scoring, team sheets, one merged
+availability truth, and price intelligence.
+
+- **B3 — live gameweek engine** (fixes M2): FPL's free `event/{gw}/live` +
+  `fixtures?event=` endpoints finally used. A 2-minute in-play poll persists
+  per-player live stats with our OWN bonus projection from the BPS boards
+  (3/2/1 with FPL's exact tie sharing — property-tested), keeps fixture
+  states/scores current, and pushes the X2 SSE data channel
+  (`/api/live/stream`) so open dashboards refresh within a poll of reality.
+  `GET /api/live` serves the scoreboard, the top-points board, the price
+  ticker, and — with `?teamId=` — YOUR live total with auto-sub preview
+  (bench order, formation minimums, GK-for-GK) and effective-captain
+  doubling (vice steps in when the captain blanks). Dashboard gained the
+  gameweek clock: deadline countdown, LIVE scores, projected bonus, ticker.
+- **B2 — predicted + confirmed XIs** (fixes S2): every run now writes a
+  predicted XI per next-event fixture from our own minutes model
+  (formation-valid, `lineups` kind=predicted); the fixture preview endpoint
+  returns predicted AND confirmed sheets. API-Football fixture ids are
+  mapped daily (kickoff+team-pair matching, entitlement-learned), the
+  KO-window job pulls confirmed sheets T−90→KO for mapped fixtures, and a
+  landed sheet triggers ONE `mini_lineup` fast-path run — the orchestrator
+  now honors the kind: no news pull, no indexing, no re-sync, straight to
+  stats → match → publish (AI structurally unreachable, as ever).
+- **A3/C3 — availability reconciliation** (fixes S3: the table shipped in
+  0004 with no writer): one pass merges FPL flags + chance_next, active
+  structured injuries, and tier-1/2 news-text hints into
+  `availability_state` per (player, next fixture) — p_available, a state
+  label, evidence, and a CONFLICT flag when FPL says fine but the press
+  says out. C3's return-date extraction parses "out for six weeks" /
+  "ruled out for 2-3 weeks" / FPL's "Expected back 15 Nov" into dates and
+  compares them to the kickoff. L3 minutes now consume the reconciled cap.
+  Runs after every bootstrap sync window and inside every full run.
+- **A2 — price intelligence** (fixes S9's noisy momentum too): an
+  ownership-scaled threshold model (⚙ `price_model`,
+  θ = θ_base · (own%/10)^power) predicts tonight's risers/fallers at 22:30
+  UTC into `price_predictions`; each morning the calls are scored against
+  actual `price_events` and θ_base is refit as a NEW config version
+  (over-calling raises the bar, missing real moves lowers it — data, not
+  code). `GET /api/prices/predictions` serves the board with yesterday's
+  scorecard; Weekly's price-risk panel gained fall-urgency
+  (tonight/soon/watch); the L12 momentum z-term now normalises net
+  transfers by the same ownership-aware threshold.
+- Tests: 13 new (bonus tie-sharing matrix, auto-sub rules incl. formation
+  minimums, live poller against a fake FPL, return-date extraction,
+  reconciliation conflicts, threshold scaling + calibration raising θ).
+  161 backend tests green.
+
+## v1.4.3 — 2026-08-21 · schema 12 (no migration)
+
+engineupgradeplus.md release 3 — "the nervous system": the keyless RSS
+anchor, matchday-aware scheduling, indexer correctness, published match
+previews, the user-facing news surface, and the A6 quick features.
+
+- **C1 — RSS ingestion engine** (fixes N1): a keyless always-on news anchor
+  (`rss` provider row, outside the max-2 switch) pulling ⚙ `rss_feeds`
+  (BBC / Sky / Guardian by default) with conditional GETs (ETag /
+  Last-Modified persisted per feed) and a dependency-free RSS 2.0 parser
+  (CDATA, entities, tag stripping). Items flow into the SAME news_items
+  store, near-dup pool and indexer as NewsData — at zero credits.
+  Live-verified: BBC 81 items parsed, Sky 20; a CDN-blocked feed (Guardian
+  403s Node's HTTP client) fails alone and never blocks the others.
+- **C2 — matchday-aware scheduler**: one 15-minute tick classifies the
+  matchday phase (in-play / KO-window 90 min / deadline-24h / quiet) and
+  pulls RSS + NewsData on ⚙ `news_scheduler` cadences, indexing after each
+  pull; a 02:15 UTC price-watch bootstrap sync lands FPL price changes
+  before the 03:30 micro-run re-ranks. All statistical — the AI layer stays
+  structurally unreachable from the scheduler.
+- **C6 — indexer correctness**: possessives are stripped before
+  normalisation ("Haaland's brace" now links — N2); signal classification
+  gained a negation guard with clause-boundary scope ("will NOT be banned"
+  no longer classifies, "not banned, but refused to train" still does —
+  N4); story clustering corroborates by shared player + shared signal
+  category, so the same story under an editorially different headline
+  clusters ("Haaland suspended" ↔ "City dealt major blow" — N3); the AI
+  bundle window reads ⚙ `human_factors.news_signals.window_days` instead of
+  a hard-coded 7 (N5).
+- **B1 — match previews published** (fixes M1/M8): every insight row now
+  carries win/draw/loss probabilities and top scorelines (Poisson over the
+  blended lambdas); new `GET /api/fixtures/:uid/preview` adds clean-sheet
+  odds and h2h context from our own imported fixture history; the dashboard
+  match-engine card shows percentages and the most likely score.
+- **C5 — news product surface** (closes N6's product gap): dashboard
+  Newsroom feed (story-deduped, corroboration counts, signal badges, player
+  chips) via `GET /api/news/feed`; per-player news timeline on the player
+  page via `GET /api/players/:uid/news`; player photos cached under
+  `DATA_DIR/media/` (official FPL photo by fpl_code, TheSportsDB cutout
+  fallback) and served same-origin at `/api/media/players/…` because the
+  CSP blocks external image hosts by design (X2). Daily scheduler pass
+  keeps the cache warm.
+- **A6 — quick engine features** (fixes S5): per-player venue splits in L0
+  (xGI/90 at venue ÷ overall, shrunk toward neutral, bounded ±15%) scale
+  the fixture attack multiplier; FPL's ICT index joins the stat score as ⚙
+  `stat_score_weights.w8` (default 0.05) z-term; `ep_next` (FPL's own xPts
+  benchmark) and ICT appear as sortable display columns on the rankings.
+- Tests: 13 new (RSS parser on real-shape XML, negation matrix, possessive
+  linking + cross-headline clustering against the DB, matchday phases,
+  venue-split shrinkage). 148 backend tests green.
+
+## v1.4.2 — 2026-08-21 · schema 12
+
+Migration 0012 (`user_teams.kind` + `source_run_id`). engineupgradeplus.md
+release 2 — "the product asks": squad-style everywhere with savable builds,
+the Run data-depth selector on a real subscription model, and the captaincy
+display fix.
+
+- **P2 — Weekly squad style**: `/api/modes/weekly` now returns the engine's
+  picked best XI for the selected team (same `pickStartingXi`, same
+  `PitchView` payload as Initial/Chips — formation, C/V armbands, bench
+  order), plus a post-transfer variant: every suggestion row gained a
+  "preview XI" button that re-picks the XI with the move applied.
+- **P2 — Savable builds**: every generated squad — Initial XI, Free Hit
+  build, Wildcard build, Weekly XI (pre- or post-transfer) — has "Save as
+  team". `user_teams` grew `kind`
+  (`manual|imported|initial_xi|freehit|wildcard|weekly`, default manual) and
+  `source_run_id`, so a build remembers which run priced it. Teams page
+  shows kind + run badges; screenshot confirms land as `imported`; clones
+  inherit their source's kind.
+- **P1 — provider subscription model** (⚙ `provider_plans`): a researched
+  tier catalog per provider (free/pro/standard/basic…, each with depth,
+  rate and cost) with an admin plan selector on every Data-provider card.
+  Selecting a plan snapshots the tier into model_config, finally fills
+  `api_providers.quota_limit` from the plan's rate (audit X5), and re-arms
+  entitlement probes — learned denials are cleared so each gated scope gets
+  ONE fresh try under the new plan.
+- **P1 — Run data-depth selector**: the Run screen's Data-window table
+  gained a per-source "Pull depth" dropdown (days / months / seasons /
+  career; admin-gated). Options = the selected plan's reach ∩ the
+  entitlement table's learned denials, and refused options stay visible with
+  the reason — "why can't I select 5 years on NewsData free" is answered in
+  the dropdown itself. Selections write ⚙ `history_depth.per_provider`; the
+  next launch run backfills exactly what was selected through the resumable
+  `history_pulls` ledger and reports what was pulled and what the plan
+  refused.
+- **P1 — new backfill executors**: football-data past seasons
+  (`?season=YYYY`, paid scope, PLAN_DENIED learned), API-Football 2022–2024
+  fixtures + season injury logs (historical injuries land `is_active=false`
+  as pattern data), NewsData archive sweep (paid tiers), Understat
+  per-season xG aggregates (merged into `player_season_history.stats` beside
+  the FPL career numbers). All ledgered, resumable, entitlement-guarded.
+- **B5 — captaincy display = ceiling** (audit M3): the pool was ordered by
+  simulated P90 ceiling but displayed the doubled mean, so rank 1 could show
+  a lower number than rank 2. The stored score is now the ceiling; the
+  Weekly panel labels it and shows the mean alongside.
+- Tests: 10 new integration tests (kind roundtrip, plan catalog + quota
+  fill, depth folding, plan ∩ entitlement gating, plan-refusal report lines
+  with zero API calls). 135 backend tests green.
+
+## v1.4.1 — 2026-08-21 · schema 11
+
+Migration 0011 (`key_audit`). engineupgradeplus.md release 1 — "stop the
+bleeding": the two live bugs (key wipe X1, OpenAI vision 400 X4) plus the
+mechanisms that end their bug classes (P4 capability registry, P3 OCR-first
+image parsing, X3 vision budget guard).
+
+- **X1 — API keys can no longer be silently wiped**: `upsertEnvVar` now
+  takes an exclusive lock file around its read-modify-write of
+  `shared/.env` (O_EXCL, stale-lock takeover, atomic tmp+rename, mode 600),
+  resolves the env file once through `realpath` (ENV_FILE wins), and every
+  admin key change writes a `key_audit` row (env var, actor, old/new last-4
+  hint, set/clear — never the value). The server logs a provider
+  key-presence report at boot, and `rehearse-upgrade.sh` now plants a
+  synthetic key before upgrading and fails the rehearsal if the env-merge
+  loses it.
+- **P4 — AI model-capability registry** (⚙ `ai_model_capabilities`): ordered
+  pattern rules resolve per-(provider, model) capabilities — token
+  parameter (`max_tokens` vs `max_completion_tokens`), temperature
+  free/locked, per-MODEL vision, JSON mode, max-output floor. All five
+  adapters (openai-compatible, anthropic, gemini, ollama, mock) build
+  request bodies from the registry, never hard-coded params. This fixes the
+  reported bug: image upload with OpenAI gpt-5-era models 400'd with
+  "Unsupported parameter: 'max_tokens'… use 'max_completion_tokens'".
+- **Learned capability overrides**: a live 400 that names the fix is parsed
+  (`learnFromParamError`), the request is retried once with the corrected
+  parameter, and the lesson is persisted to `ai_providers.config.capabilities`
+  — the AI-side mirror of ingest entitlement learning. Selecting a model in
+  the admin panel fires a 16-token capability probe; the admin AI card shows
+  the resolved capabilities (vision / token param / temperature) per
+  provider, plus a vision-model override (unlocks e.g. DeepSeek's separate
+  vision model).
+- **Anthropic/Gemini correctness**: repair-retry messages are user-role-only
+  (assistant-first messages 400 on current Anthropic models); temperature is
+  omitted for the 4.6+/5-family; Gemini 2.5-era gets max-output headroom for
+  thinking tokens; default Anthropic models bumped to current IDs.
+- **X3 — vision budget guard**: non-admin image parses are refused (402)
+  before the AI call when the token balance is under
+  ⚙ `ai.vision_estimate_credits`; a `finish_reason: length` truncation now
+  returns 422 "truncated" instead of a JSON-parse error.
+- **P3 — OCR-first image parsing** (⚙ `vision_pipeline`): team screenshots
+  are OCR'd locally first (tesseract.js WASM + sharp preprocessing: 2×
+  upscale, grayscale, normalise, sharpen, auto-negate on dark themes; the
+  eng.traineddata model ships inside the release payload, cache under
+  DATA_DIR). When ≥ `min_names` name-like lines are found, the noisy text
+  goes to the TEXT model to reformat into the 15-player contract — no vision
+  tokens spent. Vision remains the fallback ladder (images downscaled to
+  ≤1568px JPEG before upload). The Teams page shows which path parsed the
+  image.
+- Tests: 15 new unit tests (registry resolution, learned-retry against a
+  fake 400, adapter body shapes per provider, env-lock 20-writer race, real
+  OCR extraction from a synthetic FPL-style screenshot). 125 backend tests
+  green.
+
 ## v1.4.0 — 2026-08-21 · schema 10
 
 Migration 0010 (news engine + history ledger). The data-provider system

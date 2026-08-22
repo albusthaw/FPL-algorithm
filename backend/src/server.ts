@@ -18,6 +18,8 @@ import { adminRoutes } from './routes/admin.js';
 import { runRoutes } from './routes/runs.js';
 import { teamRoutes } from './routes/teams.js';
 import { modeRoutes } from './routes/modes.js';
+import { newsRoutes } from './routes/news.js';
+import { liveRoutes } from './routes/live.js';
 import { startScheduler } from './run/scheduler.js';
 
 export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance> {
@@ -55,6 +57,8 @@ export async function buildServer(db: Knex = defaultDb): Promise<FastifyInstance
   await app.register(runRoutes, { db });
   await app.register(teamRoutes, { db });
   await app.register(modeRoutes, { db });
+  await app.register(newsRoutes, { db });
+  await app.register(liveRoutes, { db });
 
   // static frontend (frontend/dist next to backend/ per the release layout)
   const frontendDist = [
@@ -85,6 +89,15 @@ async function main(): Promise<void> {
   const app = await buildServer(defaultDb);
   await app.listen({ port: config.port, host: config.host });
   log.info({ port: config.port, version: config.version }, 'fpl-algorithm backend up');
+
+  // X1 (v1.4.1): key-presence report at every boot — a wiped key is visible
+  // in the log the moment it happens, with the canonical env-file path so a
+  // split-path write can never hide.
+  const { envKeyReport } = await import('./core/env.js');
+  const { PROVIDER_KEY_FIELDS } = await import('./core/secrets.js');
+  const keyNames = Object.values(PROVIDER_KEY_FIELDS).flat().filter((f) => f.secret).map((f) => f.env);
+  const report = envKeyReport([...new Set(keyNames)]);
+  log.info({ envFile: report.file, set: report.set, empty: report.empty }, 'provider key presence');
 
   // Scheduler: STATISTICAL ONLY. Constructed without any AI gateway
   // dependency — scheduled code structurally cannot invoke AI (§7.0).

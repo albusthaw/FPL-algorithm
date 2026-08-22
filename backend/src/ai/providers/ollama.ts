@@ -96,6 +96,18 @@ export class OllamaAdapter implements AIProviderAdapter {
     return this.chat([{ role: 'user', content: VISION_PROMPT, images: [imageBase64] }], { images: true });
   }
 
+  /** Text-only reformat of OCR output into the team-parse JSON (P3). */
+  async parseTeamText(ocrText: string, _inv: AIInvocation): Promise<ProviderResult> {
+    const { OCR_REFORMAT_PROMPT } = await import('../prompt.js');
+    return this.chat(
+      [
+        { role: 'system', content: OCR_REFORMAT_PROMPT },
+        { role: 'user', content: ocrText.slice(0, 6000) },
+      ],
+      {},
+    );
+  }
+
   async estimateTokens(system: string, runContext: string, batchBlock: string): Promise<number> {
     return Math.ceil((system.length + runContext.length + batchBlock.length) / 3.6);
   }

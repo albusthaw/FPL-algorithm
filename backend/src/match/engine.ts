@@ -7,6 +7,7 @@
  */
 import type { Knex } from 'knex';
 import { getConfig } from '../core/model-config.js';
+import { pickStartingXi, type SquadRules } from '../fpl/rules.js';
 import { log } from '../core/logger.js';
 
 interface MatchEngineConfig {
@@ -19,6 +20,7 @@ interface MatchEngineConfig {
   swing_threshold: number;
   chip_urgency_events: number;
   wc_horizon_events: number;
+  wc_realisation?: number; // B6 (v1.4.5): ⚙ — was a hard-coded 0.35 (M5)
 }
 
 interface ChipRules {
@@ -35,7 +37,7 @@ export interface MatchEngineResult {
 export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngineResult> {
   const cfg = await getConfig<MatchEngineConfig>(db, 'match_engine');
   const chipRules = await getConfig<ChipRules>(db, 'chip_rules');
-  const scoring = await getConfig<{ goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number }>(db, 'scoring_rules');
+  const scoring = await getConfig<{ goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number; saves_per_point?: number }>(db, 'scoring_rules');
 
   const fxPreds = await db('fixture_predictions as fp')
     .join('fixtures as f', 'f.fixture_uid', 'fp.fixture_uid')
@@ -52,9 +54,19 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
   const events = [...new Set(fxPreds.map((f) => f.event as number))].sort((a, b) => a - b);
   const windowEvents = events.slice(0, cfg.leverage_window_events);
 
-  // volatility flags: teams touched by unscheduled fixtures
+  // volatility flags: teams touched by unscheduled fixtures — and (B4/M6,
+  // v1.4.5) teams with an all-competitions midweek inside the window
   const unscheduled = await db('fixtures').where('state', 'postponed').select('home_team_uid', 'away_team_uid');
   const volatileTeams = new Set(unscheduled.flatMap((f) => [f.home_team_uid, f.away_team_uid]));
+  const teamStrengths = (await db('teams').whereNotNull('fpl_id').select('uid', 'strength')) as { uid: string; strength: { ext_fixtures?: string[] } | null }[];
+  const now = Date.now();
+  for (const t of teamStrengths) {
+    const soonExt = (t.strength?.ext_fixtures ?? []).some((d) => {
+      const ts = new Date(d).getTime();
+      return Number.isFinite(ts) && ts > now && ts < now + 10 * 86_400_000;
+    });
+    if (soonExt) volatileTeams.add(t.uid);
+  }
 
   // matrix for star density + targets
   const matrix = await db('player_matrix as pm')
@@ -90,6 +102,24 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
   const sideLeverage = new Map<string, { att: number; def: number; mci: number; event: number; teamUid: string; oppUid: string; fixtureUid: string }>();
 
   for (const f of windowFx) {
+    // B1 (v1.4.3, audit M1): the engine has computed win/draw/loss and full
+    // concession grids since day one and never exposed them — publish the
+    // preview into the insight reasons: probabilities + top scorelines
+    // (independent Poisson over the blended lambdas, display-grade).
+    const lh = Number(f.lambda_home_blend);
+    const la = Number(f.lambda_away_blend);
+    const pois = (l: number, k: number): number => (Math.exp(-l) * l ** k) / [1, 1, 2, 6, 24, 120, 720][k]!;
+    const grid: { score: string; p: number }[] = [];
+    for (let i = 0; i <= 5; i++) for (let j = 0; j <= 5; j++) grid.push({ score: `${i}-${j}`, p: pois(lh, i) * pois(la, j) });
+    const topScorelines = grid.sort((a, b) => b.p - a.p).slice(0, 3).map((s) => ({ score: s.score, p: r2(s.p) }));
+    const preview = {
+      p_home: Number(f.p_home),
+      p_draw: Number(f.p_draw),
+      p_away: Number(f.p_away),
+      top_scorelines: topScorelines,
+      lambda_home: r2(lh),
+      lambda_away: r2(la),
+    };
     for (const side of ['home', 'away'] as const) {
       const teamUid = side === 'home' ? f.home_team_uid : f.away_team_uid;
       const oppUid = side === 'home' ? f.away_team_uid : f.home_team_uid;
@@ -107,6 +137,7 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
         star_density: starDensity,
         dominant: att >= def ? 'attacking' : 'clean_sheet',
         volatility,
+        preview,
       };
       insightRows.push({
         run_id: runId,
@@ -252,7 +283,10 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
       fixture_uid: null,
       player_uid: c.uid,
       rank: idx + 1,
-      score: c.doubled.toFixed(3),
+      // B5 (v1.4.2): the pool is ORDERED by ceiling, so the ceiling is the
+      // displayed score — storing the doubled mean made rank 1 show a lower
+      // number than rank 2 (audit M3, live-verified)
+      score: c.ceiling.toFixed(3),
       reasons: JSON.stringify({ doubled_xpts: r2(c.doubled), ceiling: r2(c.ceiling), label: idx === 0 ? 'top_pick' : c.doubled > (captaincy[0]?.doubled ?? 0) ? 'safe_pick' : 'alternative' }),
     });
     targetCount++;
@@ -260,6 +294,71 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
 
   for (let i = 0; i < targetRows.length; i += 500) {
     await db('target_lists').insert(targetRows.slice(i, i + 500));
+  }
+
+  // ── A7 (v1.4.5): distribution quantiles for EVERY player's next event —
+  // the same seeded Monte Carlo the captaincy pool uses, published to the
+  // matrix as P10/P50/P90 (floors and ceilings, not just a mean)
+  {
+    const qBatch: { uid: string; q: SimQuantiles }[] = [];
+    for (const m of matrix) {
+      const rows = nextEventRows.get(m.player_uid);
+      if (!rows || rows.length === 0) continue;
+      qBatch.push({ uid: m.player_uid, q: simulateQuantiles(rows, m.position ?? 'MID', scoring, rng) });
+    }
+    for (let i = 0; i < qBatch.length; i += 200) {
+      const chunk = qBatch.slice(i, i + 200);
+      const values = chunk.map(() => '(?, ?::numeric, ?::numeric, ?::numeric)').join(', ');
+      const params = chunk.flatMap((x) => [x.uid, x.q.p10, x.q.p50, x.q.p90]);
+      await db.raw(
+        `UPDATE player_matrix pm SET p10 = v.p10, p50 = v.p50, p90 = v.p90
+         FROM (VALUES ${values}) AS v(player_uid, p10, p50, p90)
+         WHERE pm.run_id = ${Number(runId)} AND pm.player_uid = v.player_uid`,
+        params,
+      );
+    }
+  }
+
+  // ── B2 (v1.4.4): predicted XI per next-event fixture from OUR OWN minutes
+  // model (pfp p_start), formation-valid (1 GK, ≥3 DEF, ≥2 MID, ≥1 FWD).
+  // Confirmed sheets (api-football, KO window) overwrite nothing here — they
+  // live under kind='confirmed' and outrank these downstream.
+  const MINS: [string, number][] = [['GK', 1], ['DEF', 3], ['MID', 2], ['FWD', 1]];
+  for (const f of windowFx.filter((x) => x.event === nextEvent)) {
+    for (const side of ['home', 'away'] as const) {
+      const teamUid = side === 'home' ? f.home_team_uid : f.away_team_uid;
+      const rows = (pfpByFixture.get(f.fixture_uid) ?? [])
+        .filter((r) => playerMeta.get(r.player_uid)?.team_uid === teamUid)
+        .map((r) => ({ uid: r.player_uid, position: playerMeta.get(r.player_uid)!.position as string, pStart: Number(r.p_start) }))
+        .sort((a, b) => b.pStart - a.pStart);
+      if (rows.length < 11) continue;
+      const picked: typeof rows = [];
+      const taken = new Set<string>();
+      for (const [pos, min] of MINS) {
+        for (const r of rows.filter((x) => x.position === pos).slice(0, min)) {
+          picked.push(r);
+          taken.add(r.uid);
+        }
+      }
+      for (const r of rows) {
+        if (picked.length >= 11) break;
+        if (taken.has(r.uid)) continue;
+        if (r.position === 'GK') continue; // exactly one keeper
+        picked.push(r);
+        taken.add(r.uid);
+      }
+      if (picked.length < 11) continue;
+      const bench = rows.filter((r) => !taken.has(r.uid)).slice(0, 7);
+      const count = (pos: string): number => picked.filter((p) => p.position === pos).length;
+      await db.raw(
+        `INSERT INTO lineups (fixture_uid, team_uid, kind, formation, starters, bench, as_of)
+         VALUES (?, ?, 'predicted', ?, ?, ?, now())
+         ON CONFLICT (fixture_uid, team_uid, kind) DO UPDATE
+           SET formation = excluded.formation, starters = excluded.starters,
+               bench = excluded.bench, as_of = now()`,
+        [f.fixture_uid, teamUid, `${count('DEF')}-${count('MID')}-${count('FWD')}`, JSON.stringify(picked.map((p) => p.uid)), JSON.stringify(bench.map((p) => p.uid))],
+      );
+    }
   }
 
   // ── DGW/BGW detection over the projection window (pure counting)
@@ -292,16 +391,39 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
     (playersByUserTeam.get(tp.team_id) ?? playersByUserTeam.set(tp.team_id, []).get(tp.team_id)!).push(tp.player_uid);
   }
 
-  // team xpts per event helper
-  const xptsForEvent = (uids: string[], ev: number): number => {
-    let sum = 0;
-    for (const uid of uids) {
-      for (const row of pfpByPlayer.get(uid) ?? []) if (row.event === ev) sum += Number(row.xpts);
+  // per-player xpts for one event (DGW-aware sum over the event's fixtures)
+  const playerEventXpts = (uid: string, ev: number): number => {
+    let x = 0;
+    for (const row of pfpByPlayer.get(uid) ?? []) if (row.event === ev) x += Number(row.xpts);
+    return x;
+  };
+  const xptsForEvent = (uids: string[], ev: number): number => uids.reduce((s, uid) => s + playerEventXpts(uid, ev), 0);
+
+  // B6/M9 (v1.4.5): every chip baseline is the XI the manager ACTUALLY
+  // fields — best formation-valid XI with the best captain doubled — not an
+  // undoubled 15-man sum vs an undoubled top-11 proxy
+  const squadRules = await getConfig<SquadRules>(db, 'squad_rules').catch(() => null);
+  const xiWithCaptain = (uids: string[], ev: number): number => {
+    const players = uids.map((uid) => ({
+      uid,
+      position: (playerMeta.get(uid)?.position as string) ?? 'MID',
+      club: '',
+      price: 0,
+      xpts: playerEventXpts(uid, ev),
+    }));
+    if (squadRules && players.length === 15) {
+      try {
+        return pickStartingXi(players, squadRules).xptsTotal; // captain doubled
+      } catch {
+        /* invalid squad shape — fall through to the proxy */
+      }
     }
-    return sum;
+    const sorted = players.map((p) => p.xpts).sort((a, b) => b - a);
+    const top11 = sorted.slice(0, 11);
+    return top11.reduce((a, b) => a + b, 0) + (top11[0] ?? 0);
   };
 
-  // benchmark: best-20-players xpts per event (cheap optimal-squad proxy for FH value)
+  // benchmark: best-11 league-wide + best captain doubled (FH/WC ceiling)
   const bestXptsPerEvent = new Map<number, number>();
   for (const ev of events) {
     const perPlayer = new Map<string, number>();
@@ -310,7 +432,7 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
       perPlayer.set(row.player_uid, (perPlayer.get(row.player_uid) ?? 0) + Number(row.xpts));
     }
     const top11 = [...perPlayer.values()].sort((a, b) => b - a).slice(0, 11);
-    bestXptsPerEvent.set(ev, top11.reduce((a, b) => a + b, 0));
+    bestXptsPerEvent.set(ev, top11.reduce((a, b) => a + b, 0) + (top11[0] ?? 0));
   }
 
   let chipCount = 0;
@@ -370,18 +492,36 @@ export async function runMatchEngine(db: Knex, runId: number): Promise<MatchEngi
         for (const ev of setEvents) {
           let value = 0;
           if (chip === 'freehit') {
-            value = (bestXptsPerEvent.get(ev) ?? 0) - xptsForEvent(uids, ev);
+            // M9: both sides now field a captained XI
+            value = (bestXptsPerEvent.get(ev) ?? 0) - xiWithCaptain(uids, ev);
           } else if (chip === 'wildcard') {
             const horizon = setEvents.filter((e) => e >= ev).slice(0, cfg.wc_horizon_events);
-            for (const e of horizon) value += ((bestXptsPerEvent.get(e) ?? 0) - xptsForEvent(uids, e)) * 0.35;
+            const realisation = cfg.wc_realisation ?? 0.35; // ⚙ (M5)
+            for (const e of horizon) value += ((bestXptsPerEvent.get(e) ?? 0) - xiWithCaptain(uids, e)) * realisation;
           } else if (chip === 'bboost') {
-            // bench value proxy: 4 weakest squad players' xpts (peaks in DGWs)
-            const perPlayer = uids
-              .map((uid) => ({ uid, x: (pfpByPlayer.get(uid) ?? []).filter((r) => r.event === ev).reduce((s, r) => s + Number(r.xpts), 0) }))
-              .sort((a, b) => a.x - b.x);
-            value = perPlayer.slice(0, 4).reduce((s, p) => s + p.x, 0);
+            // M4: the REAL bench — the XI complement under the picked
+            // formation — not the 4 weakest squad members
+            if (squadRules && uids.length === 15) {
+              const players = uids.map((uid) => ({
+                uid,
+                position: (playerMeta.get(uid)?.position as string) ?? 'MID',
+                club: '',
+                price: 0,
+                xpts: playerEventXpts(uid, ev),
+              }));
+              try {
+                const xi = pickStartingXi(players, squadRules);
+                const starterSet = new Set(xi.starters.map((p) => p.uid));
+                value = players.filter((p) => !starterSet.has(p.uid)).reduce((s, p) => s + p.xpts, 0);
+              } catch {
+                value = 0;
+              }
+            } else {
+              const perPlayer = uids.map((uid) => playerEventXpts(uid, ev)).sort((a, b) => a - b);
+              value = perPlayer.slice(0, 4).reduce((s, x) => s + x, 0);
+            }
           } else if (chip === '3xc') {
-            const perPlayer = uids.map((uid) => (pfpByPlayer.get(uid) ?? []).filter((r) => r.event === ev).reduce((s, r) => s + Number(r.xpts), 0));
+            const perPlayer = uids.map((uid) => playerEventXpts(uid, ev));
             value = Math.max(0, ...perPlayer); // extra captain multiplier value
           }
           const dgwBonus = (dgwByEvent.get(ev) ?? []).filter((t) => uids.some((uid) => playerMeta.get(uid)?.team_uid === t)).length;
@@ -457,15 +597,23 @@ function poissonDraw(rng: () => number, lambda: number): number {
  * (hauls carry bonus), not to the mean — that is the whole point of a
  * ceiling. ⚙ draws=2000.
  */
-export function simulateP90(
+export interface SimQuantiles {
+  p10: number;
+  p50: number;
+  p90: number;
+}
+
+export function simulateQuantiles(
   rows: { p60: string | number; p_any: string | number; e_goals: string | number; e_assists: string | number; p_cs: string | number; p_defcon: string | number; e_saves: string | number; e_bonus: string | number }[],
   position: string,
-  scoring: { goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number },
+  scoring: { goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number; saves_per_point?: number },
   rng: () => number,
-): number {
-  if (rows.length === 0) return 0;
+): SimQuantiles {
+  if (rows.length === 0) return { p10: 0, p50: 0, p90: 0 };
   const goalPts = scoring.goal[position] ?? 5;
   const csPts = scoring.clean_sheet[position] ?? 0;
+  // M7 (v1.4.5): save points come from the rules, never a `/3` literal
+  const savesPerPoint = scoring.saves_per_point ?? 3;
   const draws = 2000;
   const totals: number[] = new Array(draws);
   for (let i = 0; i < draws; i++) {
@@ -483,16 +631,34 @@ export function simulateP90(
       pts += goals * goalPts + assists * scoring.assist;
       if (played60 && rng() < Number(row.p_cs)) pts += csPts;
       if (played60 && rng() < Number(row.p_defcon)) pts += 2;
-      if (position === 'GK') pts += Math.floor(poissonDraw(rng, Number(row.e_saves)) / 3);
-      // bonus rides the performance: hauls take 3, returns take 1-2,
-      // quiet games take the (small) base chance from the mean model
+      if (position === 'GK') pts += Math.floor(poissonDraw(rng, Number(row.e_saves)) / savesPerPoint);
+      // bonus rides the performance: hauls take 3; otherwise the draw comes
+      // from the ⚙ bonus model's OWN e_bonus so E[sim bonus] ≈ e_bonus (M7)
       const returns = goals + assists;
       if (returns >= 2) pts += 3;
       else if (returns === 1) pts += rng() < 0.55 ? 2 : 1;
-      else if (rng() < Math.min(0.25, Number(row.e_bonus) / 3)) pts += 1;
+      else {
+        const eb = Math.min(1.3, Number(row.e_bonus));
+        const r = rng();
+        if (r < eb / 4) pts += 2;
+        else if (r < (eb / 4) * 3) pts += 1;
+      }
     }
     totals[i] = pts;
   }
   totals.sort((a, b) => a - b);
-  return totals[Math.floor(0.9 * draws)]!;
+  return {
+    p10: totals[Math.floor(0.1 * draws)]!,
+    p50: totals[Math.floor(0.5 * draws)]!,
+    p90: totals[Math.floor(0.9 * draws)]!,
+  };
+}
+
+export function simulateP90(
+  rows: { p60: string | number; p_any: string | number; e_goals: string | number; e_assists: string | number; p_cs: string | number; p_defcon: string | number; e_saves: string | number; e_bonus: string | number }[],
+  position: string,
+  scoring: { goal: Record<string, number>; clean_sheet: Record<string, number>; assist: number; saves_per_point?: number },
+  rng: () => number,
+): number {
+  return simulateQuantiles(rows, position, scoring, rng).p90;
 }

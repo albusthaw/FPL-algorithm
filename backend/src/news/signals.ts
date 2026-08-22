@@ -58,12 +58,33 @@ const RULES: Record<SignalCategory, RegExp[]> = {
   ],
 };
 
+// C6/N4 (v1.4.3): negation guard — a keyword hit inside a negating context
+// ("will NOT be banned", "cleared of misconduct", "denies bust-up",
+// "avoids suspension") must not classify. The window looks back 40 chars
+// from the match; the guard kills THAT hit, other patterns still count.
+// clause boundaries (, ; . ! ?) reset negation scope — "not banned, but he
+// refused to train" keeps the second clause's hit
+const NEGATION_WINDOW = /\b(not|no|never|den(?:y|ies|ied)|dismiss(?:es|ed)?|reject(?:s|ed)?|quash(?:es|ed)?|avoid(?:s|ed)?|escap(?:es|ed)?|cleared of|without|rul(?:es|ed) out)\b[^.!?,;]*$/;
+
+export function isNegated(text: string, matchIndex: number): boolean {
+  const back = text.slice(Math.max(0, matchIndex - 40), matchIndex);
+  return NEGATION_WINDOW.test(back);
+}
+
 /** Classify one article's text into zero or more signal categories. */
 export function classifySignals(text: string): SignalCategory[] {
   const t = ` ${text.toLowerCase()} `;
   const hits: SignalCategory[] = [];
   for (const [cat, patterns] of Object.entries(RULES) as [SignalCategory, RegExp[]][]) {
-    if (patterns.some((p) => p.test(t))) hits.push(cat);
+    let hit = false;
+    for (const p of patterns) {
+      const m = p.exec(t);
+      if (m && !isNegated(t, m.index)) {
+        hit = true;
+        break;
+      }
+    }
+    if (hit) hits.push(cat);
   }
   return hits;
 }

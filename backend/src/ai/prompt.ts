@@ -59,6 +59,14 @@ export function buildMatrixLine(p: {
   ].join('|');
 }
 
+/** P3 (v1.4.1): OCR text → team parse. Same output contract as vision, fed
+ * by tesseract output instead of pixels — works on non-vision providers and
+ * costs a fraction of a vision call. Contains "JSON" for json_object mode. */
+export const OCR_REFORMAT_PROMPT = `You are given raw OCR text extracted from a screenshot of a Fantasy Premier League team (pitch view or list view). The OCR is noisy: prices like 7.5 may appear near names, captain armbands may appear as C or (C), vice as V, bench players are usually listed last or under a BENCH heading.
+Reconstruct the 15 players. Return ONLY a JSON array of exactly the players you can identify (aim for 15):
+{"name": string (the player name as printed, best effort), "club": string|null (short code if visible), "price": number|null (in millions, e.g. 7.5), "captain": boolean, "vice": boolean, "bench_position": integer 1-4 or null}.
+Do not invent players that are not in the text. No prose, JSON only.`;
+
 export const VISION_PROMPT = `This image is a screenshot of a Fantasy Premier League team (pitch view or list view).
 Extract all 15 players. Return ONLY a JSON array of 15 objects:
 {"name": string (as shown), "club": string|null (short code if visible), "price": number|null (in millions, e.g. 7.5), "captain": boolean (armband C), "vice": boolean (armband V), "bench_position": integer 1-4 or null (bench players left-to-right; the bench GK is 1)}.

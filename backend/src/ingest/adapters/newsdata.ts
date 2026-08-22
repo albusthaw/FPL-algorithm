@@ -209,3 +209,79 @@ export async function pullNews(
   }
   return { fetched, inserted, bumped, requests };
 }
+
+/**
+ * P1 (v1.4.2) backfill executor: the NewsData ARCHIVE endpoint — paid plans
+ * only (free tier's refusal is learned as PLAN_DENIED by guardedPull). One
+ * broad Premier-League sweep back `months`, inside an explicit credit budget.
+ */
+export async function pullNewsArchive(
+  db: Knex,
+  opts: { months: number; fetchFn?: FetchFn; budget?: number },
+): Promise<{ fetched: number; inserted: number; requests: number }> {
+  const apiKey = config.keys.newsdata;
+  if (!apiKey) throw new PullError('AUTH', 'NEWSDATA_KEY not configured');
+  const budget = opts.budget ?? 25;
+  const fromDate = new Date(Date.now() - opts.months * 30 * 86_400_000).toISOString().slice(0, 10);
+  const q = '"Premier League"';
+
+  let fetched = 0;
+  let inserted = 0;
+  let requests = 0;
+  let pageToken: string | null = null;
+  while (requests < budget) {
+    const pageParam = pageToken ? `&page=${encodeURIComponent(pageToken)}` : '';
+    const url = `https://newsdata.io/api/1/archive?apikey=${apiKey}&q=${encodeURIComponent(q)}&language=en&from_date=${fromDate}${pageParam}`;
+    const snap = await fetchWithSnapshot(db, {
+      provider: 'newsdata',
+      endpoint: 'archive',
+      url,
+      paramsHash: `archive:${fromDate}:${requests}`,
+      fetchFn: opts.fetchFn,
+    });
+    requests++;
+    const parsed = NewsResponseSchema.safeParse(snap.body);
+    if (!parsed.success || parsed.data.status !== 'success') {
+      await logPull(db, { provider: 'newsdata', capability: 'news', endpoint: 'archive', status: 'failed', errorClass: 'SCHEMA_DRIFT' });
+      break;
+    }
+    const results = parsed.data.results ?? [];
+    fetched += results.length;
+    for (const item of results) {
+      const canonical = canonicalUrl(item.link);
+      const domain = (() => {
+        try {
+          return new URL(item.source_url ?? item.link).hostname.replace(/^www\./, '');
+        } catch {
+          return '';
+        }
+      })();
+      // story clustering happens in the indexer's retroactive re-scan
+      const [row] = await db('news_items')
+        .insert({
+          provider: 'newsdata',
+          external_id: item.article_id ?? null,
+          url: item.link,
+          url_canonical: canonical,
+          title: item.title.slice(0, 500),
+          description: (item.description ?? '').slice(0, 2000),
+          content: (item.content ?? '').slice(0, 8000),
+          source_name: item.source_id ?? '',
+          source_domain: domain,
+          source_tier: sourceTier(domain),
+          published_at: item.pubDate ? new Date(item.pubDate) : null,
+          story_id: null,
+          last_seen_at: db.fn.now(),
+        })
+        .onConflict('url_canonical')
+        .ignore()
+        .returning('id');
+      if (row) inserted++;
+      else await db('news_items').where('url_canonical', canonical).update({ seen_count: db.raw('seen_count + 1'), last_seen_at: db.fn.now() });
+    }
+    await logPull(db, { provider: 'newsdata', capability: 'news', endpoint: 'archive', records: results.length, latencyMs: snap.latencyMs, status: 'ok' });
+    pageToken = parsed.data.nextPage ?? null;
+    if (!pageToken || results.length === 0) break;
+  }
+  return { fetched, inserted, requests };
+}

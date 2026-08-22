@@ -1,4 +1,6 @@
 import type { Knex } from 'knex';
+import { DEFAULT_CAPABILITIES } from './ai-capabilities.js';
+import { DEFAULT_PROVIDER_PLANS } from '../ingest/plans.js';
 
 /**
  * Every constant marked ⚙ in fpl-engines-plan.md lives here as a versioned
@@ -34,8 +36,8 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     recovery_per: 3,
     tackled_penalty: 0,
   },
-  // L12 stat_score weights (fpl-engines-plan.md §4.13)
-  stat_score_weights: { w1: 0.4, w2: 0.15, w3: 0.1, w4: 0.15, w5: 0.12, w6: 0.08 },
+  // L12 stat_score weights (fpl-engines-plan.md §4.13; w8 = ICT z-term, A6)
+  stat_score_weights: { w1: 0.4, w2: 0.15, w3: 0.1, w4: 0.15, w5: 0.12, w6: 0.08, w8: 0.05 },
   stat_score_caps: { unavailable: 25, doubtful: 60 },
   // L0 feature factory
   feature_factory: {
@@ -152,6 +154,21 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     credit_budget_run: 45,
     credit_budget_poll: 6,
   },
+  // C1 (v1.4.3): keyless RSS anchor feed registry (zero credits)
+  rss_feeds: {
+    feeds: [
+      { id: 'bbc', url: 'https://feeds.bbci.co.uk/sport/football/rss.xml', tier: 1 },
+      { id: 'sky', url: 'https://www.skysports.com/rss/12040', tier: 1 },
+      { id: 'guardian', url: 'https://www.theguardian.com/football/rss', tier: 2 },
+    ],
+    max_items_per_feed: 100,
+  },
+  // C2 (v1.4.3): matchday-aware scheduler cadences, minutes between pulls
+  // per phase (in_play / ko_window KO−90→+120 / deadline_24h / quiet)
+  news_scheduler: {
+    rss_minutes: { in_play: 15, ko_window: 15, deadline_24h: 30, quiet: 120 },
+    newsdata_minutes: { in_play: 60, ko_window: 90, deadline_24h: 120, quiet: 360 },
+  },
   // v1.4.0 historical depth: default = live pulls only (last 7 days) with the
   // previous-season floor; admins raise it up to 10 per-GW seasons (vaastav)
   // and ~20 years of per-season career aggregates (FPL history_past)
@@ -161,6 +178,24 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     seasons: 1,
     career_aggregates: false,
     max_seasons: 10,
+    // v1.4.2 P1: per-source depth selections from the Run screen
+    // ({provider: {unit: days|months|seasons|career, value}})
+    per_provider: {},
+  },
+  // v1.4.2 P1: selected subscription tier per provider (snapshot of the
+  // chosen PlanTier from ingest/plans.ts); admin plan selector writes here
+  provider_plans: DEFAULT_PROVIDER_PLANS,
+  // A1 (v1.4.5): ep_next pseudo-market blend weight for the next-1 horizon
+  l2_market: { w_ep_next: 0.15 },
+  // A2 (v1.4.4): ownership-scaled price-change threshold model — θ_base is
+  // refit nightly by calibratePriceModel as new config versions
+  price_model: {
+    theta_base: 90000,
+    ownership_power: 0.45,
+    ownership_floor: 0.5,
+    predict_min_p: 0.6,
+    calibrate_step: 0.1,
+    calibrate_min_events: 5,
   },
   // L5 DEFCON
   defcon: { window_matches: 15, mult_range: [0.8, 1.25] },
@@ -186,10 +221,23 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     swing_threshold: 2.0,
     chip_urgency_events: 4,
     wc_horizon_events: 6,
+    // B6 (v1.4.5): share of the best-XI gap a wildcard realistically
+    // captures per GW (was a hard-coded 0.35 — audit M5)
+    wc_realisation: 0.35,
   },
   // AI engine
+  // P4 (v1.4.1): model-capability registry — parameter drift is DATA.
+  // Seeded from core/ai-capabilities.ts; admins edit; probes learn on top.
+  ai_model_capabilities: DEFAULT_CAPABILITIES,
+  // P3 (v1.4.1): OCR-first team-image parsing ladder
+  vision_pipeline: {
+    ocr_first: true,
+    min_names: 8, // OCR must surface at least this many name-like lines
+    fallback_vision: true, // else fall back to the provider's vision model
+  },
   ai: {
     prompt_version: 1,
+    vision_estimate_credits: 4, // X3 BudgetGuard: pre-checked before a vision call
     batch_size: 20,
     max_news_per_player: 5,
     news_snippet_chars: 320,

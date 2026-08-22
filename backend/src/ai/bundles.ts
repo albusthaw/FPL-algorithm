@@ -4,6 +4,7 @@
  */
 import type { Knex } from 'knex';
 import { buildMatrixLine } from './prompt.js';
+import { getConfig } from '../core/model-config.js';
 import type { PlayerNewsBundle } from './types.js';
 
 /**
@@ -38,7 +39,9 @@ export async function buildNewsBundles(db: Knex, runId: number): Promise<PlayerN
     ) as { player_uid: string; at: unknown }[]).map((r) => [r.player_uid, new Date(r.at as string)]),
   );
 
-  const cutoff = new Date(Date.now() - 7 * 86_400_000);
+  // C6/N5 (v1.4.3): the news window is ⚙ human_factors.news_signals.window_days
+  const hf = await getConfig<{ news_signals?: { window_days?: number } }>(db, 'human_factors').catch(() => null);
+  const cutoff = new Date(Date.now() - (hf?.news_signals?.window_days ?? 7) * 86_400_000);
   const newsRows = await db('news_player_map as m')
     .join('news_items as n', 'n.id', 'm.news_id')
     .where('n.fetched_at', '>', cutoff)

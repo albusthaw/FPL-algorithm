@@ -4,7 +4,17 @@ import { api, ApiError, fmtPrice, n, type MatrixPlayer } from '../api';
 import { Loading } from '../components/Layout';
 import { PitchView, type PitchPlayer } from '../components/PitchView';
 
-interface TeamRow { id: number; name: string; bank: number; free_transfers: number; playerCount: number; updated_at: string }
+interface TeamRow { id: number; name: string; bank: number; free_transfers: number; playerCount: number; updated_at: string; kind?: string; source_run_id?: number | null }
+
+// P2 (v1.4.2): kind badges — what produced each saved squad
+const KIND_LABEL: Record<string, { label: string; cls: string }> = {
+  manual: { label: 'manual', cls: '' },
+  imported: { label: 'imported', cls: '' },
+  initial_xi: { label: 'Initial XI', cls: 'brass' },
+  freehit: { label: 'Free Hit build', cls: 'brass' },
+  wildcard: { label: 'Wildcard build', cls: 'brass' },
+  weekly: { label: 'Weekly XI', cls: 'brass' },
+};
 interface TeamPlayerRow { player_uid: string; slot: number; is_captain: boolean; is_vice: boolean; bench_position: number | null; web_name: string; position: string; price: number; club: string; status: string }
 interface TeamDetail { team: TeamRow & { players: TeamPlayerRow[]; notes: string; chips_used: { chip: string; set: number }[] }; valuation: { score: number; pointsPotential: number; benchStrength: number; captaincyQuality: number; budgetEfficiency: number } | null }
 
@@ -52,7 +62,11 @@ export function TeamsPage(): ReactNode {
                 <span className={`badge ${t.playerCount === 15 ? 'ok' : 'brass'}`}>{t.playerCount}/15</span>
               </div>
               <p className="mono muted" style={{ fontSize: '.76rem', marginTop: 8 }}>
-                bank {fmtPrice(t.bank)} · FT {t.free_transfers} · updated {new Date(t.updated_at).toLocaleDateString()}
+                <span className={`badge ${KIND_LABEL[t.kind ?? 'manual']?.cls ?? ''}`} data-testid={`team-kind-${t.id}`}>
+                  {KIND_LABEL[t.kind ?? 'manual']?.label ?? t.kind}
+                </span>
+                {t.source_run_id != null && <span className="badge" style={{ marginLeft: 6 }}>run {t.source_run_id}</span>}
+                {' '}· bank {fmtPrice(t.bank)} · FT {t.free_transfers} · updated {new Date(t.updated_at).toLocaleDateString()}
               </p>
             </Link>
           ))}
@@ -72,7 +86,7 @@ export function TeamDetailPage(): ReactNode {
   const [pickerSearch, setPickerSearch] = useState('');
   const [pickerResults, setPickerResults] = useState<MatrixPlayer[]>([]);
   const [resolved, setResolved] = useState<ResolvedSlot[] | null>(null);
-  const [uploadInfo, setUploadInfo] = useState<{ uploadId: number; credits: number; provider: string } | null>(null);
+  const [uploadInfo, setUploadInfo] = useState<{ uploadId: number; credits: number; provider: string; stage?: string } | null>(null);
   const [choices, setChoices] = useState<Record<number, string>>({});
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -140,9 +154,9 @@ export function TeamDetailPage(): ReactNode {
     setUploading(true);
     setError('');
     try {
-      const r = await api.upload<{ uploadId: number; credits: number; provider: string; resolved: ResolvedSlot[] }>('/api/teams/upload-image', file);
+      const r = await api.upload<{ uploadId: number; credits: number; provider: string; stage?: string; resolved: ResolvedSlot[] }>('/api/teams/upload-image', file);
       setResolved(r.resolved);
-      setUploadInfo({ uploadId: r.uploadId, credits: r.credits, provider: r.provider });
+      setUploadInfo({ uploadId: r.uploadId, credits: r.credits, provider: r.provider, stage: r.stage });
       const initial: Record<number, string> = {};
       r.resolved.forEach((slot, i) => {
         if (slot.best) initial[i] = slot.best;
@@ -204,7 +218,10 @@ export function TeamDetailPage(): ReactNode {
 
         {resolved && (
           <div className="card-shade" style={{ marginBottom: 24 }} data-testid="confirm-screen">
-            <p className="kicker">Confirmation required — parsed by {uploadInfo?.provider} ({uploadInfo?.credits} credits). Nothing is saved until you confirm.</p>
+            <p className="kicker">
+              Confirmation required — parsed via {uploadInfo?.stage === 'ocr' ? 'built-in OCR + ' : ''}{uploadInfo?.provider} ({uploadInfo?.credits} credits
+              {uploadInfo?.stage === 'ocr' ? ', token-saving OCR path' : ''}). Nothing is saved until you confirm.
+            </p>
             <div className="table-wrap">
               <table style={{ minWidth: 560 }}>
                 <thead><tr><th>#</th><th>Parsed</th><th>Resolves to</th><th>Confidence</th></tr></thead>

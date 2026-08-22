@@ -5,6 +5,7 @@ import { requireAdmin } from './auth.js';
 import { hashPassword } from '../auth/auth.js';
 import { applyTokens } from '../tokens/ledger.js';
 import { setProviderEnabled, MaxProvidersError } from '../ingest/gateway.js';
+import { PROVIDER_PLAN_TIERS, DEFAULT_PROVIDER_PLANS, tierFor, quotaLimitFor, type ProviderPlansConfig } from '../ingest/plans.js';
 import { setAliveProvider, buildAdapter } from '../ai/gateway.js';
 import { getConfig, setConfig } from '../core/model-config.js';
 import { setEnabled as setFeatureEnabled } from '../core/kernel.js';
@@ -132,6 +133,8 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
   app.get('/api/admin/providers', async (req) => {
     requireAdmin(req);
     const providers = await db('api_providers').orderBy('key');
+    // P1 (v1.4.2): subscription model — selected tier per provider + the menu
+    const plans = (await getConfig<ProviderPlansConfig>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
     // key STATUS + masked hint only — never key values (no secrets to the frontend)
     return {
       providers: providers.map((p) => ({
@@ -139,6 +142,8 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
         keyConfigured: keyConfigured(p.key),
         keyHint: keyHint(p.key),
         requiresKey: requiresKey(p.key),
+        plan: plans[p.key]?.plan ?? 'free',
+        planTiers: (PROVIDER_PLAN_TIERS[p.key] ?? []).map((t) => ({ id: t.id, label: t.label, cost: t.cost, note: t.note })),
         keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
           env: f.env,
           label: f.label,
@@ -174,6 +179,64 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     return { ok: true };
   });
 
+  // ── P1 (v1.4.2): subscription plan per provider. Writes the tier snapshot
+  //    into ⚙ provider_plans, fills api_providers.quota_limit from the tier
+  //    (fixes X5), and re-arms entitlement probes — learned denials for the
+  //    provider are cleared so each gated scope gets ONE fresh try under the
+  //    new plan (then re-learns, never hammers).
+  const PlanSchema = z.object({ plan: z.string().min(1).max(40) });
+
+  app.put('/api/admin/providers/:key/plan', async (req, reply) => {
+    requireAdmin(req);
+    const key = (req.params as { key: string }).key;
+    const parsed = PlanSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid plan payload' });
+    const tier = tierFor(key, parsed.data.plan);
+    if (!tier) return reply.code(422).send({ error: `unknown plan '${parsed.data.plan}' for provider '${key}'` });
+    const plans = (await getConfig<ProviderPlansConfig>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
+    const next = { ...plans, [key]: { plan: tier.id, depth: tier.depth, rate: tier.rate } };
+    await setConfig(db, 'provider_plans', next);
+    await db('api_providers').where({ key }).update({ quota_limit: quotaLimitFor(tier), updated_at: db.fn.now() });
+    const rearmed = await db('provider_entitlements').where({ provider: key, allowed: false }).del();
+    return { ok: true, plan: tier.id, quotaLimit: quotaLimitFor(tier), entitlementProbesRearmed: rearmed };
+  });
+
+  // ── P1 (v1.4.2): the Run screen's per-source depth selector (admin-gated).
+  //    Merges one selection into ⚙ history_depth.per_provider; the next
+  //    launch run backfills exactly what was selected (resumable ledger).
+  const DepthSchema = z.object({
+    provider: z.string().min(1).max(40),
+    unit: z.enum(['days', 'months', 'seasons', 'career']),
+    value: z.number().int().min(0).max(240),
+  });
+
+  app.put('/api/admin/history-depth', async (req, reply) => {
+    requireAdmin(req);
+    const parsed = DepthSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid depth payload' });
+    const { DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+    const depth = (await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => null)) ?? DEFAULT_HISTORY_DEPTH;
+    const next = {
+      ...DEFAULT_HISTORY_DEPTH,
+      ...depth,
+      per_provider: {
+        ...(depth.per_provider ?? {}),
+        [parsed.data.provider]: { unit: parsed.data.unit, value: parsed.data.value },
+      },
+    };
+    // vaastav/fpl selections also fold into the legacy fields so older
+    // readers (coverage text, admin tab) show the same truth
+    if (parsed.data.provider === 'vaastav' && parsed.data.unit === 'seasons') {
+      next.mode = parsed.data.value > 1 ? 'seasons' : 'days';
+      next.seasons = parsed.data.value;
+    }
+    if (parsed.data.provider === 'fpl' && parsed.data.unit === 'career') {
+      next.career_aggregates = parsed.data.value > 0;
+    }
+    await setConfig(db, 'history_depth', next);
+    return { ok: true, depth: next };
+  });
+
   // ── API keys: entered here, stored server-side in shared/.env, applied
   //    immediately. The response never contains the value.
   const SecretSchema = z.object({ env: z.string().min(1).max(64), value: z.string().max(500) });
@@ -182,33 +245,78 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     requireAdmin(req);
     const parsed = SecretSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid key payload' });
+    const hint = (v: string): string | null => (v.trim() ? `…${v.trim().slice(-4)}` : null);
+    const oldHint = hint(process.env[parsed.data.env] ?? '');
     try {
       setProviderSecret(parsed.data.env, parsed.data.value);
     } catch (err) {
       if (err instanceof SecretValidationError) return reply.code(422).send({ error: err.message });
       return reply.code(500).send({ error: 'could not save the key' });
     }
+    // X1: append-only audit — env name + last-4 hints only, never values
+    await db('key_audit').insert({
+      env_var: parsed.data.env,
+      actor_user_id: req.user.id,
+      old_hint: oldHint,
+      new_hint: hint(parsed.data.value),
+      action: parsed.data.value.trim() ? 'set' : 'clear',
+    });
     return { ok: true, set: parsed.data.value.trim().length > 0 };
+  });
+
+  // X1: the audit trail for "my key vanished" reports
+  app.get('/api/admin/key-audit', async (req) => {
+    requireAdmin(req);
+    return { audit: await db('key_audit').orderBy('id', 'desc').limit(100) };
   });
 
   // ── AI provider switch (max 1 alive)
   app.get('/api/admin/ai-providers', async (req) => {
     requireAdmin(req);
     const providers = await db('ai_providers').orderBy('key');
+    // P4: resolved capability flags per provider for its CURRENT model —
+    // the picker shows vision/params compatibility before anything breaks
+    const { loadCapabilityConfig } = await import('../ai/gateway.js');
+    const { resolveCapabilities } = await import('../core/ai-capabilities.js');
+    const capCfg = await loadCapabilityConfig(db);
+    const DEFAULT_MODEL: Record<string, string> = {
+      anthropic: 'claude-haiku-4-5',
+      openai: 'gpt-4o-mini',
+      deepseek: 'deepseek-v4-flash',
+      kimi: 'kimi-k2-0711-preview',
+      gemini: 'gemini-2.5-flash',
+      ollama: 'llama3.1:8b',
+      modal: 'default',
+      mock: 'mock-analyst-1',
+    };
     return {
-      providers: providers.map((p) => ({
-        ...p,
-        keyConfigured: keyConfigured(p.key),
-        keyHint: keyHint(p.key),
-        requiresKey: requiresKey(p.key),
-        model: (p.config as { model?: string } | null)?.model ?? null,
-        keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
-          env: f.env,
-          label: f.label,
-          secret: f.secret,
-          set: !!(process.env[f.env] ?? '').trim(),
-        })),
-      })),
+      providers: providers.map((p) => {
+        const cfg = (p.config ?? {}) as { model?: string; vision_model?: string; capabilities?: Record<string, unknown> };
+        const model = cfg.model ?? DEFAULT_MODEL[p.key] ?? '';
+        const caps = resolveCapabilities(capCfg, p.key, model, cfg.capabilities ?? null);
+        const visionModel = cfg.vision_model ?? model;
+        const visionCaps = resolveCapabilities(capCfg, p.key, visionModel, cfg.capabilities ?? null);
+        return {
+          ...p,
+          keyConfigured: keyConfigured(p.key),
+          keyHint: keyHint(p.key),
+          requiresKey: requiresKey(p.key),
+          model: cfg.model ?? null,
+          capabilities: {
+            tokenParam: caps.tokenParam,
+            temperature: caps.temperature,
+            vision: visionCaps.vision,
+            json: caps.json,
+            learned: cfg.capabilities ?? null,
+          },
+          keyFields: (PROVIDER_KEY_FIELDS[p.key] ?? []).map((f) => ({
+            env: f.env,
+            label: f.label,
+            secret: f.secret,
+            set: !!(process.env[f.env] ?? '').trim(),
+          })),
+        };
+      }),
     };
   });
 
@@ -261,9 +369,53 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     if (!parsed.success) return reply.code(400).send({ error: 'invalid model name' });
     const row = await db('ai_providers').where({ key }).first();
     if (!row) return reply.code(404).send({ error: 'unknown provider' });
-    const cfg = { ...(row.config ?? {}), model: parsed.data.model };
+    // model change invalidates previously learned param facts
+    const cfg = { ...(row.config ?? {}), model: parsed.data.model, capabilities: null };
     await db('ai_providers').where({ key }).update({ config: JSON.stringify(cfg), updated_at: db.fn.now() });
-    return { ok: true, model: parsed.data.model };
+
+    // P4 probe-and-learn: one tiny live request teaches the param shape for
+    // THIS model; 400s become learned overrides shown in the picker.
+    // Human-triggered (admin action) — never automatic.
+    let probed: Record<string, unknown> | null = null;
+    if (keyConfigured(key)) {
+      try {
+        const { loadCapabilityConfig } = await import('../ai/gateway.js');
+        const capabilityConfig = await loadCapabilityConfig(db);
+        let learnedPatch: Record<string, unknown> | null = null;
+        const adapter = buildAdapter(key, cfg, {
+          capabilityConfig,
+          onLearned: async (patch) => {
+            learnedPatch = { ...(learnedPatch ?? {}), ...patch };
+          },
+        });
+        if (adapter.probeCapabilities) {
+          const caps = await adapter.probeCapabilities();
+          probed = { ...caps };
+          if (learnedPatch) {
+            await db('ai_providers')
+              .where({ key })
+              .update({ config: JSON.stringify({ ...cfg, capabilities: learnedPatch }), updated_at: db.fn.now() });
+          }
+        }
+      } catch (err) {
+        log.warn({ key, err: String(err) }, 'capability probe failed — registry defaults stand');
+      }
+    }
+    return { ok: true, model: parsed.data.model, capabilities: probed };
+  });
+
+  // P4: vision model override (e.g. deepseek-v4-flash-vision-exp) — vision
+  // is a per-MODEL fact, so the provider can route uploads to a sibling model
+  app.put('/api/admin/ai-providers/:key/vision-model', async (req, reply) => {
+    requireAdmin(req);
+    const key = (req.params as { key: string }).key;
+    const parsed = z.object({ model: z.string().max(120).regex(/^[\w.\-:/]*$/) }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid model name' });
+    const row = await db('ai_providers').where({ key }).first();
+    if (!row) return reply.code(404).send({ error: 'unknown provider' });
+    const cfg = { ...(row.config ?? {}), vision_model: parsed.data.model || undefined };
+    await db('ai_providers').where({ key }).update({ config: JSON.stringify(cfg), updated_at: db.fn.now() });
+    return { ok: true, visionModel: parsed.data.model || null };
   });
 
   app.post('/api/admin/ai-providers/deactivate', async (req) => {
@@ -329,15 +481,70 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
     if (backfillState.running) return reply.code(409).send({ error: 'a backfill is already running' });
     const { ensureHistoryDepth, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
     const depthCfg = (await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => null)) ?? DEFAULT_HISTORY_DEPTH;
+    const plans = (await getConfig<ProviderPlansConfig>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
     backfillState.running = true;
     // runs in the background of THIS admin action (human-triggered,
     // statistical ingestion only); progress lands in the history_pulls ledger
-    void ensureHistoryDepth(db, depthCfg)
+    void ensureHistoryDepth(db, depthCfg, { plans })
       .catch((err) => log.error({ err: String(err) }, 'backfill failed'))
       .finally(() => {
         backfillState.running = false;
       });
     return { started: true, depth: depthCfg };
+  });
+
+  // ── A4 (v1.4.5): backtest & calibration harness
+  const backtestState = { running: false as boolean, last: null as unknown };
+  app.post('/api/admin/backtest', async (req, reply) => {
+    requireAdmin(req);
+    if (backtestState.running) return reply.code(409).send({ error: 'a backtest is already running' });
+    backtestState.running = true;
+    const { walkForwardBacktest } = await import('../stats/backtest.js');
+    // human-triggered, statistical only; results land in model_errors + runs
+    void walkForwardBacktest(db, { triggeredBy: req.user.id })
+      .then((m) => {
+        backtestState.last = m;
+      })
+      .catch((err) => log.error({ err: String(err) }, 'backtest failed'))
+      .finally(() => {
+        backtestState.running = false;
+      });
+    return { started: true };
+  });
+
+  app.post('/api/admin/refit', async (req, reply) => {
+    requireAdmin(req);
+    if (backtestState.running) return reply.code(409).send({ error: 'a backtest is already running' });
+    backtestState.running = true;
+    const { refitConstants } = await import('../stats/backtest.js');
+    void refitConstants(db, { triggeredBy: req.user.id })
+      .then((r) => {
+        backtestState.last = r;
+      })
+      .catch((err) => log.error({ err: String(err) }, 'refit failed'))
+      .finally(() => {
+        backtestState.running = false;
+      });
+    return { started: true };
+  });
+
+  app.get('/api/admin/backtest', async (req) => {
+    requireAdmin(req);
+    const runs = await db('runs').where('kind', 'backtest').orderBy('id', 'desc').limit(10).select('id', 'status', 'stages', 'started_at', 'finished_at');
+    const latest = runs[0];
+    let calibration: unknown = null;
+    if (latest) {
+      // calibration curve: predicted-xPts buckets vs realised mean points
+      const rows = (await db('model_errors')
+        .where('run_id', latest.id)
+        .select(db.raw(`width_bucket(xpts_pred, 0, 12, 12) AS bucket`))
+        .avg({ pred: 'xpts_pred', actual: 'points_actual' })
+        .count({ n: '*' })
+        .groupBy('bucket')
+        .orderBy('bucket')) as { bucket: number; pred: string; actual: string; n: string }[];
+      calibration = rows.map((r) => ({ bucket: Number(r.bucket), pred: Number(r.pred), actual: Number(r.actual), n: Number(r.n) }));
+    }
+    return { running: backtestState.running, lastResult: backtestState.last, runs, calibration };
   });
 
   // ── data-coverage audit (statengineexpansion.md X6): proves every active

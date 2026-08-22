@@ -102,8 +102,25 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
   };
   const asOf = new Date();
 
+  // B2 (v1.4.4): the mini_lineup fast path re-ranks on fresh team sheets —
+  // no news pull, no indexing, no FPL re-sync, no history backfill. It goes
+  // straight to stats → match → finalize (and never touches AI: ai is null
+  // by construction for scheduled kinds).
+  const fastPath = opts.kind === 'mini_lineup';
+
   // 1. NEWS PULL — ≤2 enabled providers via capability routing (skippable)
-  await timed('news_pull', 5, async () => {
+  if (!fastPath) await timed('news_pull', 5, async () => {
+    // C1 (v1.4.3): the keyless RSS anchor pulls on every run — zero credits,
+    // conditional GETs make repeats near-free; failures never block the run
+    try {
+      const { pullRssFeeds, DEFAULT_RSS_FEEDS } = await import('../ingest/adapters/rss.js');
+      const { getConfig } = await import('../core/model-config.js');
+      const rssCfg = (await getConfig<typeof DEFAULT_RSS_FEEDS>(db, 'rss_feeds').catch(() => null)) ?? DEFAULT_RSS_FEEDS;
+      const rss = await pullRssFeeds(db, rssCfg);
+      if (rss.inserted > 0) log.info({ ...rss }, 'rss pull');
+    } catch (err) {
+      degradations.push(`rss pull degraded (${String(err).slice(0, 100)})`);
+    }
     const newsProvider = await routeCapability(db, 'news');
     if (newsProvider) {
       const result = await guardedPull(db, newsProvider.key, 'latest', 'run', async () => {
@@ -130,7 +147,7 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
 
   // 1b. NEWS INDEX — systematic entity linking + signal classification +
   // story clustering over everything pulled (statistical, no AI)
-  await timed('news_index', 8, async () => {
+  if (!fastPath) await timed('news_index', 8, async () => {
     try {
       const { indexNews } = await import('../news/indexer.js');
       const r = await indexNews(db);
@@ -143,12 +160,20 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
   });
 
   // 2. INGEST — refresh the FPL anchor (never fatal if the last sync is fresh)
-  await timed('ingest', 15, async () => {
+  if (!fastPath) await timed('ingest', 15, async () => {
     try {
       await syncFplBootstrap(db);
       await syncFplFixtures(db);
     } catch (err) {
       degradations.push(`FPL sync degraded (${String(err).slice(0, 120)}) — using last snapshot`);
+    }
+    // A3 (v1.4.4): reconcile availability from FPL flags + injuries + news
+    // hints so L3 minutes read one merged truth
+    try {
+      const { writeAvailabilityState } = await import('../stats/availability.js');
+      await writeAvailabilityState(db);
+    } catch (err) {
+      degradations.push(`availability reconciliation failed (${String(err).slice(0, 100)}) — minutes use raw flags`);
     }
     // historical depth (v1.4.0): bring the DB up to the configured ⚙
     // history_depth — the previous-season floor on a fresh install (the old
@@ -158,8 +183,11 @@ async function runPipeline(db: Knex, runId: number, opts: RunOptions): Promise<v
     try {
       const { getConfig } = await import('../core/model-config.js');
       const { ensureHistoryDepth, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');
+      const { DEFAULT_PROVIDER_PLANS } = await import('../ingest/plans.js');
       const depthCfg = await getConfig<typeof DEFAULT_HISTORY_DEPTH>(db, 'history_depth').catch(() => DEFAULT_HISTORY_DEPTH);
+      const plans = (await getConfig<typeof DEFAULT_PROVIDER_PLANS>(db, 'provider_plans').catch(() => null)) ?? DEFAULT_PROVIDER_PLANS;
       const notes = await ensureHistoryDepth(db, depthCfg ?? DEFAULT_HISTORY_DEPTH, {
+        plans,
         onProgress: (msg) => emit({ runId, stage: 'ingest', detail: msg, pct: 15 }),
       });
       degradations.push(...notes.filter((n) => n.includes('failed')));

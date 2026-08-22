@@ -59,6 +59,16 @@ echo "   installed: v${PREV_VERSION}"
 echo ""
 echo "── 2. seed markers (user data + site + credentials must survive the upgrade)"
 MARKER="rehearsal-marker-$$"
+# X1 (v1.4.1): admin-entered API keys must survive the upgrade env-merge —
+# plant a synthetic key and assert it after the flip. Replace the installer's
+# empty NEWSDATA_KEY= line in place (appending would create a duplicate key).
+KEY_MARKER="rehearsal-key-${$}-abcd"
+if grep -q '^NEWSDATA_KEY=' "${APP_DIR}/shared/.env"; then
+  sed -i "s|^NEWSDATA_KEY=.*|NEWSDATA_KEY=${KEY_MARKER}|" "${APP_DIR}/shared/.env"
+else
+  echo "NEWSDATA_KEY=${KEY_MARKER}" >> "${APP_DIR}/shared/.env"
+fi
+[ "$(grep '^NEWSDATA_KEY=' "${APP_DIR}/shared/.env" | tail -1 | cut -d= -f2)" = "${KEY_MARKER}" ] || { echo "FAIL: could not seed the key marker"; exit 1; }
 DB_PASSWORD_VALUE="$(grep '^DB_PASSWORD=' "${APP_DIR}/shared/.env" | cut -d= -f2)"
 PGPASSWORD="${DB_PASSWORD_VALUE}" psql -h 127.0.0.1 -U "${DB_USER_OVERRIDE}" -d "${DB_NAME_OVERRIDE}" -c \
   "INSERT INTO feature_states (name, enabled, manifest) VALUES ('${MARKER}', true, '{}') ON CONFLICT DO NOTHING" >/dev/null
@@ -103,7 +113,10 @@ if [ -n "${NEW_ZIP}" ]; then
   [ "${SITE_AFTER_UPGRADE}" = "${SITE_BEFORE_UPGRADE}" ] || { echo "FAIL: upgrade changed SITE_DOMAIN ${SITE_BEFORE_UPGRADE} → ${SITE_AFTER_UPGRADE}"; exit 1; }
   CRED_HASH_AFTER_UPGRADE="$(sha256sum "${CRED_PATH}" | cut -d' ' -f1)"
   [ "${CRED_HASH_AFTER_UPGRADE}" = "${CRED_HASH_BEFORE_UPGRADE}" ] || { echo "FAIL: upgrade changed the credentials file"; exit 1; }
-  echo "   user data survived ✓ · symlink flipped ✓ · site unchanged (${SITE_AFTER_UPGRADE}) ✓ · credentials file unchanged ✓"
+  # X1 (v1.4.1): admin-entered keys survive the env-merge
+  KEY_AFTER_UPGRADE="$(grep '^NEWSDATA_KEY=' "${APP_DIR}/shared/.env" | tail -1 | cut -d= -f2)"
+  [ "${KEY_AFTER_UPGRADE}" = "${KEY_MARKER}" ] || { echo "FAIL: upgrade lost an admin-entered API key (${KEY_MARKER} → ${KEY_AFTER_UPGRADE})"; exit 1; }
+  echo "   user data survived ✓ · symlink flipped ✓ · site unchanged (${SITE_AFTER_UPGRADE}) ✓ · credentials file unchanged ✓ · API key survived ✓"
 
   PREV_SCHEMA="$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('${PREV_DIR}/payload/version.json','utf8')).schema))")"
   NEW_SCHEMA="$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('${NEW_DIR}/payload/version.json','utf8')).schema))")"

@@ -58,6 +58,11 @@ export interface AIProviderAdapter {
   analyse(system: string, runContext: string, batchBlock: string, inv: AIInvocation): Promise<ProviderResult>;
   repair(previous: ProviderResult, errors: string, inv: AIInvocation): Promise<ProviderResult>;
   parseTeamImage(imageBase64: string, mimeType: string, inv: AIInvocation): Promise<ProviderResult>;
+  /** P3: text-only reformat of OCR output into the team-parse JSON —
+   *  works on every provider, vision-capable or not. */
+  parseTeamText?(ocrText: string, inv: AIInvocation): Promise<ProviderResult>;
+  /** P4: one tiny live request that learns parameter capabilities from 400s. */
+  probeCapabilities?(): Promise<import('../core/ai-capabilities.js').ModelCapabilities>;
   estimateTokens(system: string, runContext: string, batchBlock: string): Promise<number>;
   healthCheck(): Promise<{ ok: boolean; detail: string }>;
   /** Live model list from the provider — powers the admin panel's model picker. */

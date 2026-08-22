@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { api, ApiError, n } from '../api';
 import { Loading } from '../components/Layout';
 
-type Tab = 'users' | 'providers' | 'ai' | 'weights' | 'logs' | 'queue' | 'coverage';
+type Tab = 'users' | 'providers' | 'ai' | 'weights' | 'logs' | 'queue' | 'coverage' | 'backtest';
 
 export function AdminPage(): ReactNode {
   const [tab, setTab] = useState<Tab>('users');
@@ -12,9 +12,9 @@ export function AdminPage(): ReactNode {
         <p className="kicker">Admin · The Back Office</p>
         <div className="section-head"><h2 className="section-title">Administration</h2></div>
         <div className="tab-row" data-testid="admin-tabs">
-          {(['users', 'providers', 'ai', 'weights', 'logs', 'queue', 'coverage'] as Tab[]).map((t) => (
+          {(['users', 'providers', 'ai', 'weights', 'logs', 'queue', 'coverage', 'backtest'] as Tab[]).map((t) => (
             <button key={t} className={`chip-paper ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)} data-testid={`admin-tab-${t}`}>
-              {{ users: 'Users & tokens', providers: 'Data providers (max 2)', ai: 'AI provider (max 1)', weights: 'Ranking weights', logs: 'Logs & costs', queue: 'Review queue', coverage: 'Data coverage' }[t]}
+              {{ users: 'Users & tokens', providers: 'Data providers (max 2)', ai: 'AI provider (max 1)', weights: 'Ranking weights', logs: 'Logs & costs', queue: 'Review queue', coverage: 'Data coverage', backtest: 'Backtest' }[t]}
             </button>
           ))}
         </div>
@@ -25,6 +25,7 @@ export function AdminPage(): ReactNode {
         {tab === 'logs' && <LogsTab />}
         {tab === 'queue' && <QueueTab />}
         {tab === 'coverage' && <CoverageTab />}
+        {tab === 'backtest' && <BacktestTab />}
       </section>
     </div>
   );
@@ -132,7 +133,8 @@ function UsersTab(): ReactNode {
 }
 
 interface KeyField { env: string; label: string; secret: boolean; set: boolean }
-interface ApiProvider { key: string; name: string; enabled: boolean; state: string; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; config: { anchor?: boolean }; quota_used: number; quota_limit: number | null }
+interface PlanTier { id: string; label: string; cost: string; note: string }
+interface ApiProvider { key: string; name: string; enabled: boolean; state: string; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; config: { anchor?: boolean }; quota_used: number; quota_limit: number | null; plan?: string; planTiers?: PlanTier[] }
 
 /** Enter/replace a provider's API key. The value is write-only: sent once,
  *  stored server-side, never shown again — only “set (…last4)”. */
@@ -222,6 +224,29 @@ function ProvidersTab(): ReactNode {
               key: {p.keyConfigured ? `✓ set${p.keyHint ? ` (${p.keyHint})` : ''}` : p.requiresKey ? '✗ required to enable' : 'not needed'}
               {' · '}quota {p.quota_used}{p.quota_limit ? `/${p.quota_limit}` : ''}
             </p>
+            {/* P1 (v1.4.2): subscription plan selector — fills quota_limit and
+                re-arms entitlement probes; depth options follow the plan */}
+            {(p.planTiers?.length ?? 0) > 0 && (
+              <label className="row" style={{ gap: 8, margin: '6px 0 10px' }}>
+                <span className="mono muted" style={{ fontSize: '.68rem' }}>PLAN</span>
+                <select
+                  className="input-paper"
+                  style={{ minWidth: 170, fontSize: '.8rem' }}
+                  value={p.plan ?? 'free'}
+                  data-testid={`provider-plan-${p.key}`}
+                  onChange={(e) => {
+                    void api
+                      .put(`/api/admin/providers/${p.key}/plan`, { plan: e.target.value })
+                      .then(load)
+                      .catch((err2) => setErr(err2 instanceof ApiError ? err2.message : String(err2)));
+                  }}
+                >
+                  {(p.planTiers ?? []).map((t) => (
+                    <option key={t.id} value={t.id} title={t.note}>{t.label} · {t.cost}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             {p.config?.anchor ? (
               <span className="badge brass">always on</span>
             ) : (
@@ -253,7 +278,8 @@ function ProvidersTab(): ReactNode {
   );
 }
 
-interface AiProvider { key: string; name: string; alive: boolean; supports_vision: boolean; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; model: string | null }
+interface AiCapabilities { tokenParam: string; temperature: string; vision: boolean; json: string; learned: Record<string, unknown> | null }
+interface AiProvider { key: string; name: string; alive: boolean; supports_vision: boolean; keyConfigured: boolean; keyHint: string | null; requiresKey: boolean; keyFields: KeyField[]; model: string | null; capabilities?: AiCapabilities }
 
 /** Model choice per AI provider: type one, or load the provider's live list. */
 function ModelPicker({ provider, onSaved }: { provider: AiProvider; onSaved: () => void }): ReactNode {
@@ -357,9 +383,16 @@ function AiTab(): ReactNode {
             </div>
             <p className="mono muted" style={{ fontSize: '.74rem', margin: '8px 0' }}>
               key: {p.keyConfigured ? `✓ set${p.keyHint ? ` (${p.keyHint})` : ''}` : p.requiresKey ? '✗ required' : 'not needed'}
-              {' · '}vision: {p.supports_vision ? 'yes' : 'no'}
               {p.model ? <> · model: <b>{p.model}</b></> : ''}
             </p>
+            {p.capabilities && (
+              <p className="mono muted" style={{ fontSize: '.7rem', margin: '0 0 8px' }} data-testid={`ai-caps-${p.key}`}>
+                model capabilities: {p.capabilities.vision ? 'vision-capable ✓' : 'no vision'}
+                {' · '}<span title="the token-limit parameter this model accepts">{p.capabilities.tokenParam}</span>
+                {' · '}{p.capabilities.temperature === 'omit' ? <b style={{ color: 'var(--brick)' }}>temperature locked</b> : 'temperature free'}
+                {p.capabilities.learned ? ' · learned from live probe' : ''}
+              </p>
+            )}
             {!p.alive && (
               <button
                 className="chip-paper"
@@ -703,6 +736,109 @@ function CoverageTab(): ReactNode {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ── A4 (v1.4.5): the backtest & calibration harness ──────────────────────
+interface BacktestRun { id: number; status: string; stages: { seasons?: string[]; events?: number; samples?: number; maeXpts?: number; rmseXpts?: number; minutesMae?: number; fixtureBrier?: number; fixtures?: number; maeByPosition?: Record<string, number> } | null; started_at: string; finished_at: string | null }
+interface CalibrationRow { bucket: number; pred: number; actual: number; n: number }
+
+function BacktestTab(): ReactNode {
+  const [data, setData] = useState<{ running: boolean; runs: BacktestRun[]; calibration: CalibrationRow[] | null } | null>(null);
+  const [msg, setMsg] = useState('');
+
+  const load = (): void => {
+    void api.get<typeof data>('/api/admin/backtest').then(setData).catch(() => setData(null));
+  };
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const start = async (path: string, label: string): Promise<void> => {
+    setMsg('');
+    try {
+      await api.post(path, {});
+      setMsg(`${label} started — walk-forward over the imported seasons (watch this tab).`);
+      load();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : String(e));
+    }
+  };
+
+  if (!data) return <Loading />;
+  const latest = data.runs[0];
+
+  return (
+    <div className="stack" data-testid="backtest-tab">
+      <div className="card-shade">
+        <p className="kicker">Walk-forward backtest (audit A4)</p>
+        <p style={{ fontSize: '.88rem', marginBottom: 12 }}>
+          Replays imported seasons through the live engine's own functions, strictly as-of each historical
+          deadline. Errors land in <span className="mono">model_errors</span>; the refit grid-searches the decay
+          and shrinkage constants and writes improvements as <b>new config versions</b> — never code edits.
+        </p>
+        <div className="row">
+          <button className="btn-glass" disabled={data.running} onClick={() => void start('/api/admin/backtest', 'Backtest')} data-testid="backtest-start">
+            {data.running ? 'Running…' : 'Run backtest'}
+          </button>
+          <button className="btn-glass" disabled={data.running} onClick={() => void start('/api/admin/refit', 'Constant refit')} data-testid="refit-start">
+            Refit constants
+          </button>
+        </div>
+        {msg && <p className="mono muted" style={{ fontSize: '.76rem', marginTop: 8 }}>{msg}</p>}
+      </div>
+
+      {latest?.stages && (
+        <div className="stat-panel" data-testid="backtest-metrics">
+          <h4>Latest backtest — run #{latest.id}</h4>
+          <div className="stat-row"><span>Seasons</span><b>{(latest.stages.seasons ?? []).join(', ') || '—'}</b></div>
+          <div className="stat-row"><span>Events × samples</span><b>{latest.stages.events ?? 0} × {latest.stages.samples?.toLocaleString() ?? 0}</b></div>
+          <div className="stat-row"><span>xPts MAE / RMSE</span><b className="mono">{n(latest.stages.maeXpts ?? 0, 3)} / {n(latest.stages.rmseXpts ?? 0, 3)}</b></div>
+          <div className="stat-row"><span>Minutes MAE</span><b className="mono">{n(latest.stages.minutesMae ?? 0)}</b></div>
+          <div className="stat-row"><span>Fixture 1X2 Brier ({latest.stages.fixtures ?? 0} fixtures)</span><b className="mono">{n(latest.stages.fixtureBrier ?? 0, 3)} <span className="muted" style={{ fontSize: '.68rem' }}>(uniform = 0.667)</span></b></div>
+          {Object.entries(latest.stages.maeByPosition ?? {}).map(([pos, mae]) => (
+            <div className="stat-row" key={pos}><span>MAE · {pos}</span><b className="mono">{n(mae, 3)}</b></div>
+          ))}
+        </div>
+      )}
+
+      {data.calibration && data.calibration.length > 0 && (
+        <div className="card">
+          <p className="kicker">Calibration — predicted vs realised (per xPts bucket)</p>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Predicted (mean)</th><th>Realised (mean)</th><th>Samples</th><th>Bias</th></tr></thead>
+              <tbody>
+                {data.calibration.map((c) => (
+                  <tr key={c.bucket}>
+                    <td className="mono">{n(c.pred, 2)}</td>
+                    <td className="mono">{n(c.actual, 2)}</td>
+                    <td className="mono">{c.n.toLocaleString()}</td>
+                    <td className={c.pred - c.actual > 0.5 ? 'rc-down' : c.actual - c.pred > 0.5 ? 'rc-up' : ''}>
+                      {(c.pred - c.actual > 0 ? '+' : '') + n(c.pred - c.actual, 2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {data.runs.length > 1 && (
+        <div className="card">
+          <p className="kicker">Backtest history (non-regression record)</p>
+          {data.runs.map((r) => (
+            <p key={r.id} className="mono" style={{ fontSize: '.78rem', padding: '4px 0' }}>
+              #{r.id} · {new Date(r.started_at).toLocaleString()} · MAE {n(r.stages?.maeXpts ?? 0, 3)} · Brier {n(r.stages?.fixtureBrier ?? 0, 3)} · {r.stages?.samples?.toLocaleString() ?? 0} samples
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -4,6 +4,11 @@ Every build session (human or AI) follows this file. It is the contract that
 keeps upgrades safe, the theme consistent, and the architecture invariants
 intact. Read it before writing a line of code.
 
+> Historical planning documents referenced below (fpl-project.md,
+> fpl-engines-plan.md, fpl-api-integration-plan.md, fpl-ai-engine-plan.md,
+> howupgradeshouldwork-1.md, statengineexpansion.md, enginesupgrade.md) now
+> live in `Old Markdown/`. The active plan is `engineupgradeplus.md`.
+
 ---
 
 ## RULE #1 (HARD-CODED, READ FIRST) — Write code to meet `upgrade.sh` demands, and how to repack the release zip
@@ -204,6 +209,11 @@ normalisation (§8.1) are non-negotiable. Pricing lives in
 `model_config.ai_pricing` (data, not code).
 
 ## 8. Version policy
+
+**Release numbering (owner decision, 2026-08-21): releases bump PATCH by
++0.0.1** (1.4.0 → 1.4.1 → 1.4.2 …), even for feature releases. Minor/major
+bumps are reserved for explicit owner calls. Schema keeps its own monotonic
+integer per Rule 1b regardless of the version digits.
 
 Latest stable majors at build time, then pinned. **This build:** Node 22 LTS
 (`engines: {"node": ">=22"}` + install-time runtime check), PostgreSQL 16

@@ -5,6 +5,7 @@
  * Coverage flags are NOT entitlement — entitlement is learned from denials.
  */
 import { z } from 'zod';
+import { ulid } from 'ulid';
 import type { Knex } from 'knex';
 import { config } from '../../core/config.js';
 import { fetchWithSnapshot, logPull, type FetchFn } from '../http.js';
@@ -63,6 +64,9 @@ export async function pullInjuries(
   db: Knex,
   season: number,
   fetchFn?: FetchFn,
+  // historical (P1 backfill): rows land is_active=false as pattern data —
+  // a 2023 hamstring must never read as a CURRENT absence
+  opts: { historical?: boolean } = {},
 ): Promise<{ records: number; resolved: number; queued: number }> {
   if (!config.keys.apiFootball) throw new PullError('AUTH', 'API_FOOTBALL_KEY not configured');
   const url = `${BASE}/injuries?league=${EPL_LEAGUE_ID}&season=${season}`;
@@ -114,6 +118,26 @@ export async function pullInjuries(
     if (outcome.kind === 'ignored') continue;
     resolved++;
     const kind = (inj.reason ?? '').toLowerCase().includes('suspend') || (inj.type ?? '').toLowerCase().includes('suspend') ? 'suspension' : 'injury';
+    if (opts.historical) {
+      const startDate = inj.fixture.date ? inj.fixture.date.slice(0, 10) : null;
+      const dupe = await db('injuries')
+        .where({ player_uid: outcome.playerUid, kind, source: 'api_football', is_active: false })
+        .where('start_date', startDate)
+        .first();
+      if (!dupe) {
+        await db('injuries').insert({
+          player_uid: outcome.playerUid,
+          source: 'api_football',
+          kind,
+          reason: inj.reason ?? inj.type ?? '',
+          start_date: startDate,
+          fixture_scope: [inj.fixture.id],
+          confidence: 0.85,
+          is_active: false,
+        });
+      }
+      continue;
+    }
     // fixture-scoped absence (who misses THIS match) — one active row per
     // player+kind; check-then-insert (partial-unique trap, §1.4)
     await db.transaction(async (trx) => {
@@ -318,4 +342,113 @@ function namesRoughlyEqual(a: string, b: string): boolean {
   const ca = FPL_CLUB_FULL[clean(a)] ?? clean(a);
   const cb = FPL_CLUB_FULL[clean(b)] ?? clean(b);
   return ca === cb || ca.includes(cb) || cb.includes(ca);
+}
+
+const SeasonFixtureSchema = z
+  .object({
+    fixture: z.object({ id: z.number(), date: z.string(), status: z.object({ short: z.string() }).passthrough() }).passthrough(),
+    league: z.object({ round: z.string().optional() }).passthrough(),
+    teams: z.object({ home: z.object({ id: z.number() }).passthrough(), away: z.object({ id: z.number() }).passthrough() }).passthrough(),
+    goals: z.object({ home: z.number().nullable(), away: z.number().nullable() }).passthrough(),
+  })
+  .passthrough();
+
+/**
+ * P1 (v1.4.2) backfill executor: one PAST season of EPL results + that
+ * season's injury log. The free plan serves seasons 2022–2024 only — other
+ * years fail as PLAN_DENIED inside HTTP 200 and are learned by guardedPull.
+ * Skips a season already imported (vaastav or football-data).
+ */
+export async function backfillApiFootballSeason(
+  db: Knex,
+  season: number, // start year: 2023 = the 2023/24 season
+  fetchFn?: FetchFn,
+): Promise<{ matches: number; stored: number; injuries: number; note?: string }> {
+  const seasonLabel = `${season}/${String((season + 1) % 100).padStart(2, '0')}`;
+  const already = await db('fixtures').where('season', seasonLabel).first('fixture_uid');
+  let stored = 0;
+  let matches = 0;
+  if (!already) {
+    const url = `${BASE}/fixtures?league=${EPL_LEAGUE_ID}&season=${season}`;
+    const snap = await fetchWithSnapshot(db, { provider: 'api_football', endpoint: 'fixtures-season', url, headers: headers(), paramsHash: `fixtures-${season}`, fetchFn });
+    const { response } = assertOk(snap.body);
+    try {
+      await seedTeamMap(db, season, fetchFn);
+    } catch {
+      /* plan-denied or offline — existing identities may still cover the season */
+    }
+    const teamMap = await apiFootballTeamMap(db);
+    await db.transaction(async (trx) => {
+      for (const raw of response) {
+        const parsed = SeasonFixtureSchema.safeParse(raw);
+        if (!parsed.success) continue;
+        const f = parsed.data;
+        matches++;
+        if (f.fixture.status.short !== 'FT' || f.goals.home == null || f.goals.away == null) continue;
+        const homeUid = teamMap.get(f.teams.home.id);
+        const awayUid = teamMap.get(f.teams.away.id);
+        if (!homeUid || !awayUid) continue; // unmapped (relegated) club — never mint teams here
+        const dupe = await trx('fixtures').where({ season: seasonLabel, home_team_uid: homeUid, away_team_uid: awayUid }).first('fixture_uid');
+        if (dupe) continue;
+        const round = f.league.round ?? '';
+        const event = /(\d+)\s*$/.exec(round) ? Number(/(\d+)\s*$/.exec(round)![1]) : null;
+        await trx('fixtures').insert({
+          fixture_uid: `fx_${ulid()}`,
+          season: seasonLabel,
+          fpl_fixture_id: null,
+          event,
+          home_team_uid: homeUid,
+          away_team_uid: awayUid,
+          kickoff_utc: f.fixture.date,
+          state: 'checked',
+          home_score: f.goals.home,
+          away_score: f.goals.away,
+          stats: JSON.stringify({ source: 'api_football', af_id: f.fixture.id }),
+        });
+        stored++;
+      }
+    });
+    await logPull(db, { provider: 'api_football', capability: 'fixtures', endpoint: 'fixtures-season', records: stored, latencyMs: snap.latencyMs, status: 'ok' });
+  }
+  // the season's injury log — historical pattern data (is_active=false)
+  let injuries = 0;
+  try {
+    const r = await pullInjuries(db, season, fetchFn, { historical: true });
+    injuries = r.records;
+  } catch (err) {
+    if (!(err instanceof PullError) || (err.errorClass !== 'PLAN_DENIED' && err.errorClass !== 'EMPTY_OK')) throw err;
+  }
+  return { matches, stored, injuries, note: already ? `season ${seasonLabel} fixtures already imported` : undefined };
+}
+
+/**
+ * B2 (v1.4.4): map the CURRENT season's API-Football fixture ids onto our
+ * fixtures (kickoff-window + team-pair matching — never by name), stored in
+ * fixtures.stats.af_id so the KO-window lineup/odds jobs can address them.
+ * Current-season fixtures are a paid scope on the free plan: the denial is
+ * learned once via guardedPull and this is never hammered.
+ */
+export async function mapApiFootballFixtures(db: Knex, season: number, fetchFn?: FetchFn): Promise<{ mapped: number }> {
+  const url = `${BASE}/fixtures?league=${EPL_LEAGUE_ID}&season=${season}`;
+  const snap = await fetchWithSnapshot(db, { provider: 'api_football', endpoint: 'fixtures-map', url, headers: headers(), paramsHash: `map-${season}`, fetchFn });
+  const { response } = assertOk(snap.body);
+  const teamMap = await apiFootballTeamMap(db);
+  let mapped = 0;
+  for (const raw of response) {
+    const parsed = SeasonFixtureSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const f = parsed.data;
+    const homeUid = teamMap.get(f.teams.home.id);
+    const awayUid = teamMap.get(f.teams.away.id);
+    if (!homeUid || !awayUid) continue;
+    const kickoff = new Date(f.fixture.date);
+    const updated = await db('fixtures')
+      .where({ home_team_uid: homeUid, away_team_uid: awayUid })
+      .whereNotNull('fpl_fixture_id')
+      .whereBetween('kickoff_utc', [new Date(kickoff.getTime() - 36e5), new Date(kickoff.getTime() + 36e5)])
+      .update({ stats: db.raw(`stats || ?::jsonb`, [JSON.stringify({ af_id: f.fixture.id })]) });
+    mapped += updated;
+  }
+  await logPull(db, { provider: 'api_football', capability: 'fixtures', endpoint: 'fixtures-map', records: mapped, latencyMs: snap.latencyMs, status: 'ok' });
+  return { mapped };
 }

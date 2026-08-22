@@ -82,6 +82,9 @@ export interface MatrixPlayer {
   form_ewma?: string;
   fdr_next3?: string;
   ai_rationale?: string;
+  // A6 (v1.4.3): FPL's own benchmark + ICT — display columns
+  ep_next?: string | null;
+  ict_index?: string | null;
 }
 
 export const fmtPrice = (tenths: number): string => `£${(tenths / 10).toFixed(1)}m`;
