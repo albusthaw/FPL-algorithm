@@ -24,7 +24,8 @@ for (const width of WIDTHS) {
 
     test(`login page fits at ${width}px`, async ({ page }) => {
       await page.goto('/login');
-      await page.waitForLoadState('networkidle');
+      await page.waitForLoadState('load');
+      await page.waitForTimeout(600);
       await assertNoHorizontalOverflow(page);
     });
 
@@ -33,7 +34,10 @@ for (const width of WIDTHS) {
       await login(page, ADMIN);
       for (const target of PAGES) {
         await page.goto(target.path);
-        await page.waitForLoadState('networkidle');
+        // NOT networkidle: the dashboard holds a live SSE stream open (X2,
+        // v1.4.4) so the network never idles — by design
+        await page.waitForLoadState('load');
+        await page.waitForTimeout(900);
         await assertNoHorizontalOverflow(page, `${target.name}@${width}`);
       }
     });

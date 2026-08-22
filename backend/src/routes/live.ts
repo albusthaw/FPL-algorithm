@@ -169,6 +169,9 @@ export async function liveRoutes(app: FastifyInstance, opts: { db: Knex }): Prom
     const send = (payload: unknown): void => {
       reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
+    // flush the headers NOW — writeHead alone buffers until the first write,
+    // which would otherwise be the 15 s heartbeat (EventSource.onopen waits)
+    reply.raw.write(': connected\n\n');
     liveEvents.on('live', send);
     const heartbeat = setInterval(() => reply.raw.write(': hb\n\n'), 15_000);
     req.raw.on('close', () => {

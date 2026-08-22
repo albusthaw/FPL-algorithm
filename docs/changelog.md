@@ -57,6 +57,17 @@ corrections.
   model_errors rows + Brier beating uniform, style-multiplier ordering +
   clamp, quantile monotonicity + ceiling, save-rate shrinkage).
   165 backend tests green.
+- **Ship verification** (engineupgradeplus.md Part 6 gates): both gap-audit
+  Playwright specs hardened from soft-log to hard assertions — 30 PRESENT
+  lines green against the deployed app (only referee context, the dashboard
+  confirmed-XI chip and data-dependent timelines remain soft GAPs). Full
+  E2E suite 46/46 with the mock AI (OCR-first live parse included).
+  Found-and-fixed while hardening: both SSE endpoints buffered their
+  headers until the first heartbeat (EventSource.onopen waited ~15 s) — an
+  immediate `: connected` flush opens them instantly. Rehearsed: fresh
+  install + idempotent reinstall, and v1.4.0 → v1.4.5 (schema 10 → 14)
+  with user data / site / credentials / admin-entered API key surviving,
+  rollback to v1.4.0 and post-rollback re-upgrade.
 
 ## v1.4.4 — 2026-08-21 · schema 13
 

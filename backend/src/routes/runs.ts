@@ -188,6 +188,8 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
       runEvents.removeListener(`run:${runId}`, send);
       clearInterval(heartbeat);
     };
+    // flush headers immediately (writeHead alone buffers until the first write)
+    reply.raw.write(': connected\n\n');
     runEvents.on(`run:${runId}`, send);
     const heartbeat = setInterval(() => reply.raw.write(': hb\n\n'), 15_000);
     req.raw.on('close', cleanup);
