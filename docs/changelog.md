@@ -52,12 +52,20 @@ the real keys before the fix and re-verified after.
   ⚙ `rss_feeds` row (admin customisations untouched, idempotent).
 - **Run screen** news counts and recent-news window follow
   ⚙ `human_factors.news_signals.window_days` instead of a hard-coded 7 days.
+- **A new key heals a stale AUTH error.** A poll that ran while a key was
+  missing marks its provider `error` ("key expired/revoked?") and the panel
+  kept saying so after the key was re-entered, until the next successful
+  pull. `PUT /api/admin/keys` now resets state/circuit for the providers
+  that env var belongs to (`clearAuthError`), so the panel and the next poll
+  start clean.
 - **E2E hardening**: the admin and keys specs never overwrite an API key
-  that is already configured (the previous suite wiped three real keys on
-  the sandbox).
+  that is already configured, clear only the dummy keys they seeded, and put
+  the provider switches back as found (the previous suite wiped three real
+  keys on the sandbox — twice).
 - Tests: `test/integration/v146.test.ts` (aliases, every matching rule, the
-  boot gate, `parseFeedDate`, RSS fault isolation, feed-default repair).
-  Backend suite 188 green.
+  boot gate, `parseFeedDate`, RSS fault isolation, feed-default repair,
+  AUTH heal). Backend suite 190 green. Playwright e2e 46/46 against the live
+  sandbox.
 
 ## v1.4.5 — 2026-08-21 · schema 14
 

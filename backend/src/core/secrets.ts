@@ -36,6 +36,14 @@ export const PROVIDER_KEY_FIELDS: Record<string, KeyField[]> = {
 
 const ALLOWED_ENV_VARS = new Set(Object.values(PROVIDER_KEY_FIELDS).flat().map((f) => f.env));
 
+/** Providers whose key fields include this env var (a new key invalidates a
+ *  stale AUTH diagnosis on each of them). Unknown env → []. */
+export function providersForEnv(envVar: string): string[] {
+  return Object.entries(PROVIDER_KEY_FIELDS)
+    .filter(([, fields]) => fields.some((f) => f.env === envVar))
+    .map(([key]) => key);
+}
+
 /** Providers that can be enabled/activated WITHOUT any key. */
 const NO_KEY_NEEDED = new Set(['fpl', 'understat', 'thesportsdb', 'ollama', 'mock']);
 

@@ -100,6 +100,22 @@ export async function recordPullResult(db: Knex, providerKey: string, ok: boolea
   }
 }
 
+/**
+ * A freshly entered key invalidates the "key expired/revoked?" diagnosis: put
+ * any of these providers that sit in state 'error' back to 'ok' with a closed
+ * circuit, so the panel and the next poll start clean instead of waiting for
+ * the next successful pull to heal them. Returns how many rows changed.
+ */
+export async function clearAuthError(db: Knex, providerKeys: string[]): Promise<number> {
+  if (providerKeys.length === 0) return 0;
+  const n = await db('api_providers')
+    .whereIn('key', providerKeys)
+    .where('state', 'error')
+    .update({ state: 'ok', circuit_failures: 0, circuit_open_until: null, updated_at: db.fn.now() });
+  if (n > 0) log.info({ providers: providerKeys, healed: n }, 'provider AUTH error cleared by new key');
+  return n;
+}
+
 /** Entitlement learning (integration plan §1.2): PLAN_DENIED is never re-tried. */
 export async function learnEntitlement(
   db: Knex,

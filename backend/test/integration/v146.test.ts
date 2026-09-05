@@ -12,6 +12,8 @@ import { indexNews, clubTermsFor, ensureNewsIndexVersion } from '../../src/news/
 import { getConfig, setConfig } from '../../src/core/model-config.js';
 import { parseFeedDate } from '../../src/ingest/http.js';
 import { pullRssFeeds, repairKnownFeedDefaults, DEFAULT_RSS_FEEDS } from '../../src/ingest/adapters/rss.js';
+import { providersForEnv } from '../../src/core/secrets.js';
+import { clearAuthError } from '../../src/ingest/gateway.js';
 
 let db: Knex;
 
@@ -287,6 +289,26 @@ describe('repairKnownFeedDefaults — the all-sport Sky feed we shipped is rewri
     expect(DEFAULT_RSS_FEEDS.feeds.find((f) => f.id === 'sky')?.url).toBe('https://www.skysports.com/rss/11661');
     // leave the shared model_config in its shipped state for the other suites
     await setConfig(db, 'rss_feeds', DEFAULT_RSS_FEEDS);
+  });
+});
+
+describe('a new key clears a stale AUTH error on its provider (live finding: NewsData stuck on "error" after its key was re-entered)', () => {
+  it('providersForEnv maps env vars to provider keys', () => {
+    expect(providersForEnv('NEWSDATA_KEY')).toEqual(['newsdata']);
+    expect(providersForEnv('MODAL_KEY')).toEqual(['modal']);
+    expect(providersForEnv('NOT_A_KEY')).toEqual([]);
+  });
+  it('clearAuthError heals only providers in state error, once', async () => {
+    await db('api_providers').where('key', 'newsdata').update({ state: 'error', circuit_failures: 3 });
+    await db('api_providers').where('key', 'api_football').update({ state: 'degraded' });
+    expect(await clearAuthError(db, providersForEnv('NEWSDATA_KEY'))).toBe(1);
+    const nd = await db('api_providers').where('key', 'newsdata').first('state', 'circuit_failures', 'circuit_open_until');
+    expect(nd).toMatchObject({ state: 'ok', circuit_failures: 0, circuit_open_until: null });
+    expect(await clearAuthError(db, providersForEnv('NEWSDATA_KEY'))).toBe(0);
+    // a degraded (circuit) provider is not an AUTH problem — untouched
+    expect(await clearAuthError(db, ['api_football'])).toBe(0);
+    expect((await db('api_providers').where('key', 'api_football').first('state')).state).toBe('degraded');
+    expect(await clearAuthError(db, [])).toBe(0);
   });
 });
 

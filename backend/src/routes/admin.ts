@@ -261,7 +261,15 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
       new_hint: hint(parsed.data.value),
       action: parsed.data.value.trim() ? 'set' : 'clear',
     });
-    return { ok: true, set: parsed.data.value.trim().length > 0 };
+    const set = parsed.data.value.trim().length > 0;
+    // a new key invalidates a stale AUTH diagnosis — heal 'error' providers now
+    let healed = 0;
+    if (set) {
+      const { providersForEnv } = await import('../core/secrets.js');
+      const { clearAuthError } = await import('../ingest/gateway.js');
+      healed = await clearAuthError(db, providersForEnv(parsed.data.env));
+    }
+    return { ok: true, set, healed };
   });
 
   // X1: the audit trail for "my key vanished" reports
