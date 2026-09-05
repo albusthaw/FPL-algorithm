@@ -62,6 +62,10 @@ test.describe('v1.1.0: sortable table, skip-list buttons, admin keys & models', 
     // sportmonks has no key: its enable button must be disabled with guidance
     const card = page.getByTestId('provider-sportmonks');
     await expect(card).toBeVisible();
+    // a REAL key is configured on this install → never overwrite/clear it;
+    // the set→hint→clear flow is only exercised on a key-less provider
+    const alreadySet = await card.locator('text=/✓ set/').isVisible().catch(() => false);
+    test.skip(alreadySet, 'sportmonks key configured on this install — key mutation skipped to protect it');
     const toggle = page.getByTestId('provider-toggle-sportmonks');
     const disabledBefore = await toggle.isDisabled();
     if (disabledBefore) {

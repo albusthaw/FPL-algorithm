@@ -162,6 +162,58 @@ export async function logPull(
   }
 }
 
+/**
+ * Timezone abbreviations feeds actually emit in RFC-822 pubDates. V8's Date
+ * parser only understands GMT/UTC/Z and numeric offsets — Sky Sports emits
+ * "BST", which parsed to Invalid Date and crashed the news_items insert with
+ * pg 22007 (v1.4.6 live finding). Abbreviations are ambiguous in general
+ * (IST/CST) so the table is deliberately limited to what football feeds use.
+ */
+const TZ_ABBREVIATIONS: Record<string, string> = {
+  BST: '+0100',
+  GMT: '+0000',
+  UTC: '+0000',
+  UT: '+0000',
+  WET: '+0000',
+  WEST: '+0100',
+  IST: '+0100', // Irish Standard Time (RTÉ feeds)
+  CET: '+0100',
+  CEST: '+0200',
+  EET: '+0200',
+  EEST: '+0300',
+  EST: '-0500',
+  EDT: '-0400',
+  CST: '-0600',
+  CDT: '-0500',
+  MST: '-0700',
+  MDT: '-0600',
+  PST: '-0800',
+  PDT: '-0700',
+};
+
+/**
+ * Parse a feed/API date string defensively. Returns null (never Invalid Date)
+ * when the string is missing, empty, or unparseable even after substituting a
+ * known timezone abbreviation — callers store null rather than crashing the
+ * whole pull pass on one malformed item.
+ */
+export function parseFeedDate(s: string | null | undefined): Date | null {
+  if (!s) return null;
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+  const direct = new Date(trimmed);
+  if (!Number.isNaN(direct.getTime())) return direct;
+  const m = /\b([A-Z]{2,4})\s*$/.exec(trimmed);
+  if (m) {
+    const offset = TZ_ABBREVIATIONS[m[1]!.toUpperCase()];
+    if (offset) {
+      const retry = new Date(trimmed.slice(0, m.index).trimEnd() + ' ' + offset);
+      if (!Number.isNaN(retry.getTime())) return retry;
+    }
+  }
+  return null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -41,9 +41,13 @@ test.describe('admin panel', () => {
         { env, value },
       );
     };
-    await setKey('API_FOOTBALL_KEY', 'e2e-dummy-key');
-    await setKey('NEWSDATA_KEY', 'e2e-dummy-key');
-    await setKey('SPORTMONKS_TOKEN', 'e2e-dummy-key');
+    // NEVER overwrite a real key: only seed dummies where no key is configured
+    // (running this suite against a live install must not wipe its keys)
+    const providers = (await page.evaluate(async () => (await (await fetch('/api/admin/providers')).json()).providers)) as { key: string; keyConfigured: boolean }[];
+    const configured = new Set(providers.filter((p) => p.keyConfigured).map((p) => p.key));
+    if (!configured.has('api_football')) await setKey('API_FOOTBALL_KEY', 'e2e-dummy-key');
+    if (!configured.has('newsdata')) await setKey('NEWSDATA_KEY', 'e2e-dummy-key');
+    if (!configured.has('sportmonks')) await setKey('SPORTMONKS_TOKEN', 'e2e-dummy-key');
     await page.reload();
     await page.getByTestId('admin-tab-providers').click();
 

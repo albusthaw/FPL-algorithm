@@ -12,7 +12,7 @@
 import { z } from 'zod';
 import type { Knex } from 'knex';
 import { config } from '../../core/config.js';
-import { fetchWithSnapshot, logPull, type FetchFn } from '../http.js';
+import { fetchWithSnapshot, logPull, parseFeedDate, type FetchFn } from '../http.js';
 import { PullError } from '../errors.js';
 import { normaliseName, trigramSimilarity } from '../../players/resolver.js';
 
@@ -176,7 +176,7 @@ export async function pullNews(
             source_name: item.source_id ?? '',
             source_domain: domain,
             source_tier: sourceTier(domain),
-            published_at: item.pubDate ? new Date(item.pubDate) : null,
+            published_at: parseFeedDate(item.pubDate),
             story_id: near ? (near.story_id ?? near.id) : null,
             last_seen_at: db.fn.now(),
           })
@@ -269,7 +269,7 @@ export async function pullNewsArchive(
           source_name: item.source_id ?? '',
           source_domain: domain,
           source_tier: sourceTier(domain),
-          published_at: item.pubDate ? new Date(item.pubDate) : null,
+          published_at: parseFeedDate(item.pubDate),
           story_id: null,
           last_seen_at: db.fn.now(),
         })

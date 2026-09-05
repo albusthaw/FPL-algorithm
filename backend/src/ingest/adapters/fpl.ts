@@ -4,7 +4,7 @@ import type { Knex } from 'knex';
 import { config } from '../../core/config.js';
 import { fetchWithSnapshot, logPull, type FetchFn } from '../http.js';
 import { PullError } from '../errors.js';
-import { normaliseName } from '../../players/resolver.js';
+import { aliasesFor } from '../../players/aliases.js';
 import { log } from '../../core/logger.js';
 
 const FPL_BASE = 'https://fantasy.premierleague.com/api';
@@ -362,9 +362,11 @@ export async function syncFplBootstrap(
         });
       }
 
-      // alias seeding: web_name + full name (normalised)
-      for (const alias of new Set([normaliseName(el.web_name), normaliseName(fullName)])) {
-        if (!alias) continue;
+      // alias seeding (v1.4.6): ORDER-PRESERVING phrases the indexer can
+      // actually find in prose — web name, full name, first + surname,
+      // bare surname. (The old normaliseName seeds were token-sorted and
+      // matched only when alphabetical: "Bruno Fernandes" never linked.)
+      for (const alias of aliasesFor({ webName: el.web_name, firstName: el.first_name, secondName: el.second_name, fullName })) {
         await trx.raw(
           `INSERT INTO player_aliases (player_uid, alias, source) VALUES (?, ?, 'fpl')
            ON CONFLICT (player_uid, alias) DO NOTHING`,

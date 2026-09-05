@@ -99,6 +99,17 @@ async function main(): Promise<void> {
   const report = envKeyReport([...new Set(keyNames)]);
   log.info({ envFile: report.file, set: report.set, empty: report.empty }, 'provider key presence');
 
+  // v1.4.6: alias-generation version gate — re-seed aliases + re-index every
+  // article ONCE when this DB was indexed by an older generator (the
+  // "Bruno Fernandes has zero news" fix, retroactive). Statistical, background.
+  void import('./ingest/adapters/rss.js')
+    .then(({ repairKnownFeedDefaults }) => repairKnownFeedDefaults(defaultDb))
+    .catch((err) => log.warn({ err: String(err) }, 'rss feed default repair failed'))
+    .then(() => import('./news/indexer.js'))
+    .then(({ ensureNewsIndexVersion }) => ensureNewsIndexVersion(defaultDb))
+    .then((r) => log.info(r, 'news index version check'))
+    .catch((err) => log.warn({ err: String(err) }, 'news index version check failed'));
+
   // Scheduler: STATISTICAL ONLY. Constructed without any AI gateway
   // dependency — scheduled code structurally cannot invoke AI (§7.0).
   startScheduler(defaultDb);
