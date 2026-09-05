@@ -42,12 +42,25 @@ test.describe('admin panel', () => {
       );
     };
     // NEVER overwrite a real key: only seed dummies where no key is configured
-    // (running this suite against a live install must not wipe its keys)
-    const providers = (await page.evaluate(async () => (await (await fetch('/api/admin/providers')).json()).providers)) as { key: string; keyConfigured: boolean }[];
+    // (running this suite against a live install must not wipe its keys), and
+    // remember exactly which ones WE seeded — v1.4.6 found the unconditional
+    // cleanup below wiping three real keys on a live sandbox
+    const providers = (await page.evaluate(async () => (await (await fetch('/api/admin/providers')).json()).providers)) as {
+      key: string;
+      keyConfigured: boolean;
+      enabled: boolean;
+    }[];
     const configured = new Set(providers.filter((p) => p.keyConfigured).map((p) => p.key));
-    if (!configured.has('api_football')) await setKey('API_FOOTBALL_KEY', 'e2e-dummy-key');
-    if (!configured.has('newsdata')) await setKey('NEWSDATA_KEY', 'e2e-dummy-key');
-    if (!configured.has('sportmonks')) await setKey('SPORTMONKS_TOKEN', 'e2e-dummy-key');
+    const enabledBefore = providers.filter((p) => p.enabled).map((p) => p.key);
+    const seeded: string[] = [];
+    const seedIfMissing = async (providerKey: string, env: string): Promise<void> => {
+      if (configured.has(providerKey)) return;
+      await setKey(env, 'e2e-dummy-key');
+      seeded.push(env);
+    };
+    await seedIfMissing('api_football', 'API_FOOTBALL_KEY');
+    await seedIfMissing('newsdata', 'NEWSDATA_KEY');
+    await seedIfMissing('sportmonks', 'SPORTMONKS_TOKEN');
     await page.reload();
     await page.getByTestId('admin-tab-providers').click();
 
@@ -55,20 +68,23 @@ test.describe('admin panel', () => {
       await page.getByTestId(`provider-toggle-${key}`).click();
       await page.waitForTimeout(400);
     };
+    const isEnabled = async (key: string): Promise<boolean> =>
+      ((await page.getByTestId(`provider-toggle-${key}`).textContent()) ?? '').includes('Enabled');
+    const ALL = ['api_football', 'newsdata', 'sportmonks', 'football_data', 'thesportsdb', 'understat'];
     // reset to all-disabled, then enable two; the third must be refused
-    for (const key of ['api_football', 'newsdata', 'sportmonks', 'football_data', 'thesportsdb', 'understat']) {
-      const button = page.getByTestId(`provider-toggle-${key}`);
-      if ((await button.textContent())?.includes('Enabled')) await toggle(key);
-    }
+    for (const key of ALL) if (await isEnabled(key)) await toggle(key);
     await toggle('api_football');
     await toggle('newsdata');
     await toggle('sportmonks'); // third — refused
     await expect(page.getByTestId('provider-error')).toContainText(/at most 2/i);
 
-    // clean up the dummy keys
-    await setKey('API_FOOTBALL_KEY', '');
-    await setKey('NEWSDATA_KEY', '');
-    await setKey('SPORTMONKS_TOKEN', '');
+    // clean up: ONLY the dummy keys this test seeded, then put the provider
+    // switches back the way the install had them
+    for (const env of seeded) await setKey(env, '');
+    for (const key of ALL) {
+      const want = enabledBefore.includes(key);
+      if ((await isEnabled(key)) !== want) await toggle(key);
+    }
   });
 
   test('AI switch: activating one deactivates the incumbent (max 1)', async ({ page }) => {
