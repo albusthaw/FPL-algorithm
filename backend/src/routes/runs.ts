@@ -17,6 +17,9 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
     requireAuth(req);
     const runId = await latestCompleteRunId(db);
     const aiCfg = await getConfig<{ exclusion_bottom_pct: number }>(db, 'ai');
+    // the "N news" counters use the same ⚙ window the human-factor signals do
+    const hf = await getConfig<{ news_signals?: { window_days?: number } }>(db, 'human_factors').catch(() => null);
+    const newsWindowMs = (hf?.news_signals?.window_days ?? 7) * 86_400_000;
     let candidates: { uid: string; web_name: string; position: string; rank: number | null; preChecked: boolean; newsCount: number }[] = [];
     if (runId) {
       const matrix = await db('player_matrix as pm')
@@ -29,7 +32,7 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
         ((
           await db('news_player_map as m')
             .join('news_items as n', 'n.id', 'm.news_id')
-            .where('n.fetched_at', '>', new Date(Date.now() - 7 * 86_400_000))
+            .where('n.fetched_at', '>', new Date(Date.now() - newsWindowMs))
             .select('m.player_uid')
             .count({ c: '*' })
             .groupBy('m.player_uid')
@@ -50,7 +53,7 @@ export async function runRoutes(app: FastifyInstance, opts: { db: Knex }): Promi
     // why the AI pass may have little/nothing to read — shown BEFORE launch
     const enabled = await db('api_providers').where('enabled', true).select('key', 'capabilities');
     const newsProviderEnabled = enabled.some((p) => (p.capabilities ?? []).includes('news'));
-    const recentNews = await db('news_items').where('fetched_at', '>', new Date(Date.now() - 7 * 86_400_000)).count('* as c');
+    const recentNews = await db('news_items').where('fetched_at', '>', new Date(Date.now() - newsWindowMs)).count('* as c');
     // launch-run data window: how far back each provider CAN reach, what the
     // configured ⚙ history_depth will pull, and what is already imported
     const { historyCoverage, depthSelectorOptions, DEFAULT_HISTORY_DEPTH } = await import('../ingest/backfill.js');

@@ -1,5 +1,72 @@
 # Changelog
 
+## v1.4.6 — 2026-09-05 · schema 14
+
+No migration. A live-tested correction of the news pipeline after the owner
+reported "Bruno Fernandes has zero news" and suspicious per-player counts on
+the Run screen. Every finding below was reproduced against live feeds with
+the real keys before the fix and re-verified after.
+
+- **News linking — aliases were structurally unmatchable.** Player aliases
+  were seeded through the resolver's token-SORTING canonicaliser
+  (`normaliseName`), while the indexer matches order-preserving phrases in
+  running text: "Bruno Fernandes" was stored as "borges bruno fernandes" and
+  could never match — 332 of ~600 players were linkable only through a
+  one-token web name. New `players/aliases.ts` (`aliasesFor`) generates
+  order-preserving press names: web name, full name, first + surname, both
+  orders for multi-token given names, first name + web name ("Gabriel
+  Martinelli"), and the bare surname. `ALIAS_VERSION` = 2.
+- **Indexer matching rules rewritten** (`news/indexer.ts`): longest alias
+  first with span masking (Myles Lewis-Skelly no longer links Rico Lewis);
+  a mononym needs its club named as a whole word from the club's press names
+  (the old `includes('man')` matched "manager" and "Germany"); a mononym
+  shared by two players at the same club is ambiguous and never links alone;
+  a mononym must be written as a name — capitalised, not preceded by another
+  capitalised non-club word ("Woolsington Hall" is an estate, not Lewis
+  Hall; "dining hall" is not either) — and a mononym that is also a given
+  name in the league ("Bradley", "Enzo", "Gabriel") must not be followed by
+  one ("Bradley Barcola" is not Conor Bradley, "Enzo Maresca" is not Enzo
+  Fernández, even when that person is not in the players table). Links are
+  DERIVED: a re-index replaces them, so corrections also remove yesterday's
+  false positives. ⚙ `news_indexer.masked_phrases` (admin-editable) blanks
+  colliding names before matching.
+- **One-time retroactive correction on upgrade**: boot hook
+  `ensureNewsIndexVersion` re-seeds aliases and runs a full re-index once
+  when ⚙ `news_index_state.alias_version` is behind the code. Admin → Logs
+  gains a "News linking health" card (items / indexed / links / players
+  linked, top-linked players) and a "Re-index all news" button
+  (`POST /api/admin/news/reindex`, `GET /api/admin/news/link-stats`).
+- **RSS feed pull crashed on Sky's "BST" dates — every scheduled news tick
+  had been dying silently since 2026-08-22.** `new Date("… BST")` is Invalid
+  Date; PostgreSQL rejected the `news_items` insert (22007) and the thrown
+  error ended the whole cadence tick after the BBC feed, skipping the
+  NewsData poll and the index pass. New `parseFeedDate` (shared by RSS +
+  NewsData, incl. the archive path) maps the timezone abbreviations feeds
+  actually emit and returns null rather than an invalid date; the RSS item
+  loop is per-item fault-isolated (one bad row is counted in
+  `api_pull_log.error_detail`, never aborts the feed); network/HTTP feed
+  failures now record their status in `error_detail`.
+- **Sky RSS default was the all-sport headline feed** (`rss/12040`: F1,
+  tennis, rugby in the Newsroom). Default is now Sky Sports Premier League
+  (`rss/11661`); a boot-time repair rewrites that one URL in an install's
+  ⚙ `rss_feeds` row (admin customisations untouched, idempotent).
+- **Run screen** news counts and recent-news window follow
+  ⚙ `human_factors.news_signals.window_days` instead of a hard-coded 7 days.
+- **A new key heals a stale AUTH error.** A poll that ran while a key was
+  missing marks its provider `error` ("key expired/revoked?") and the panel
+  kept saying so after the key was re-entered, until the next successful
+  pull. `PUT /api/admin/keys` now resets state/circuit for the providers
+  that env var belongs to (`clearAuthError`), so the panel and the next poll
+  start clean.
+- **E2E hardening**: the admin and keys specs never overwrite an API key
+  that is already configured, clear only the dummy keys they seeded, and put
+  the provider switches back as found (the previous suite wiped three real
+  keys on the sandbox — twice).
+- Tests: `test/integration/v146.test.ts` (aliases, every matching rule, the
+  boot gate, `parseFeedDate`, RSS fault isolation, feed-default repair,
+  AUTH heal). Backend suite 190 green. Playwright e2e 46/46 against the live
+  sandbox.
+
 ## v1.4.5 — 2026-08-21 · schema 14
 
 Migration 0014 (`player_matrix.p10/p50/p90` + `team_style_stats.stats`).

@@ -5,3 +5,7 @@ dist-release/
 shared-dev/
 *.log
 .env
+
+# Playwright run artifacts (never versioned)
+e2e/test-results/
+e2e/playwright-report/

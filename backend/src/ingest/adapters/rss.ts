@@ -15,9 +15,10 @@
  * the items themselves ARE the persisted record.
  */
 import type { Knex } from 'knex';
-import { logPull, type FetchFn } from '../http.js';
+import { logPull, parseFeedDate, type FetchFn } from '../http.js';
 import { normaliseName, trigramSimilarity } from '../../players/resolver.js';
 import { canonicalUrl } from './newsdata.js';
+import { log } from '../../core/logger.js';
 
 export interface RssFeed {
   id: string;
@@ -34,11 +35,42 @@ export interface RssFeedsConfig {
 export const DEFAULT_RSS_FEEDS: RssFeedsConfig = {
   feeds: [
     { id: 'bbc', url: 'https://feeds.bbci.co.uk/sport/football/rss.xml', tier: 1 },
-    { id: 'sky', url: 'https://www.skysports.com/rss/12040', tier: 1 },
+    // 11661 = Sky Sports Premier League. 12040 (shipped ≤1.4.5) is Sky's
+    // all-sport headline feed — F1, tennis, rugby landed in the Newsroom.
+    { id: 'sky', url: 'https://www.skysports.com/rss/11661', tier: 1 },
     { id: 'guardian', url: 'https://www.theguardian.com/football/rss', tier: 2 },
   ],
   max_items_per_feed: 100,
 };
+
+/** Feed URLs we shipped as defaults and later found wrong → their replacement. */
+const KNOWN_FEED_REPAIRS: Record<string, string> = {
+  'https://www.skysports.com/rss/12040': 'https://www.skysports.com/rss/11661',
+};
+
+/**
+ * Boot-time repair of a default WE shipped: an install whose ⚙ rss_feeds row
+ * still points at a known-wrong URL gets that one entry rewritten. Admin
+ * customisations (other feeds, tiers, limits) are untouched; returns the
+ * number of entries repaired. Idempotent.
+ */
+export async function repairKnownFeedDefaults(db: Knex): Promise<{ repaired: number }> {
+  const { getConfig, setConfig } = await import('../../core/model-config.js');
+  const cfg = await getConfig<RssFeedsConfig>(db, 'rss_feeds').catch(() => null);
+  if (!cfg || !Array.isArray(cfg.feeds)) return { repaired: 0 };
+  let repaired = 0;
+  const feeds = cfg.feeds.map((f) => {
+    const fixed = KNOWN_FEED_REPAIRS[f.url];
+    if (!fixed) return f;
+    repaired++;
+    return { ...f, url: fixed };
+  });
+  if (repaired > 0) {
+    await setConfig(db, 'rss_feeds', { ...cfg, feeds });
+    log.info({ repaired }, 'rss feed defaults repaired');
+  }
+  return { repaired };
+}
 
 export interface RssItem {
   title: string;
@@ -134,7 +166,9 @@ export async function pullRssFeeds(db: Knex, cfg: RssFeedsConfig, fetchFn?: Fetc
     try {
       res = await f(feed.url, { headers, signal: AbortSignal.timeout(15_000) });
     } catch (err) {
-      await logPull(db, { provider: 'rss', capability: 'news', endpoint: feed.id, status: 'failed', errorClass: 'NETWORK' });
+      const cause = err instanceof Error && err.cause ? ` (${String(err.cause)})` : '';
+      const detail = `${err instanceof Error ? err.message : String(err)}${cause}`;
+      await logPull(db, { provider: 'rss', capability: 'news', endpoint: feed.id, status: 'failed', errorClass: 'NETWORK', errorDetail: detail });
       continue; // one dead feed never blocks the others
     }
     if (res.status === 304) {
@@ -143,7 +177,16 @@ export async function pullRssFeeds(db: Knex, cfg: RssFeedsConfig, fetchFn?: Fetc
       continue;
     }
     if (!res.ok) {
-      await logPull(db, { provider: 'rss', capability: 'news', endpoint: feed.id, status: 'failed', errorClass: res.status === 429 ? 'RATE_LIMITED' : 'NETWORK' });
+      // the status is the diagnosis operators need in Admin → Logs ("HTTP 403"
+      // from an egress filter reads very differently from a 500)
+      await logPull(db, {
+        provider: 'rss',
+        capability: 'news',
+        endpoint: feed.id,
+        status: 'failed',
+        errorClass: res.status === 429 ? 'RATE_LIMITED' : 'NETWORK',
+        errorDetail: `HTTP ${res.status} ${res.statusText}`.trim(),
+      });
       continue;
     }
     const etag = res.headers.get('etag');
@@ -153,7 +196,12 @@ export async function pullRssFeeds(db: Knex, cfg: RssFeedsConfig, fetchFn?: Fetc
     const xml = await res.text();
     const items = parseRss(xml).slice(0, cfg.max_items_per_feed);
     fetched += items.length;
+    let feedErrors = 0;
     for (const item of items) {
+      // one malformed item (an unparseable date, a 3-kB title) must never
+      // kill the feed pass — v1.4.6 found Sky's "BST" pubDates doing exactly
+      // that, which silently ended every scheduler news tick after the BBC
+      try {
       const canonical = canonicalUrl(item.link);
       const domain = (() => {
         try {
@@ -176,7 +224,7 @@ export async function pullRssFeeds(db: Knex, cfg: RssFeedsConfig, fetchFn?: Fetc
           source_name: feed.id,
           source_domain: domain,
           source_tier: feed.tier,
-          published_at: item.pubDate ? new Date(item.pubDate) : null,
+          published_at: parseFeedDate(item.pubDate),
           story_id: near ? (near.story_id ?? near.id) : null,
           last_seen_at: db.fn.now(),
         })
@@ -192,8 +240,12 @@ export async function pullRssFeeds(db: Knex, cfg: RssFeedsConfig, fetchFn?: Fetc
       }
       inserted++;
       pool.push({ id: Number(row.id ?? row), title: item.title, story_id: near ? (near.story_id ?? near.id) : null, norm: itemNorm });
+      } catch (err) {
+        feedErrors++;
+        if (feedErrors <= 3) log.warn({ feed: feed.id, link: item.link, err: String(err).slice(0, 200) }, 'rss item skipped');
+      }
     }
-    await logPull(db, { provider: 'rss', capability: 'news', endpoint: feed.id, records: items.length, status: 'ok' });
+    await logPull(db, { provider: 'rss', capability: 'news', endpoint: feed.id, records: items.length, status: 'ok', errorDetail: feedErrors ? `${feedErrors} items skipped` : undefined });
   }
 
   await saveFeedStates(db, states);

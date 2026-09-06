@@ -261,7 +261,15 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
       new_hint: hint(parsed.data.value),
       action: parsed.data.value.trim() ? 'set' : 'clear',
     });
-    return { ok: true, set: parsed.data.value.trim().length > 0 };
+    const set = parsed.data.value.trim().length > 0;
+    // a new key invalidates a stale AUTH diagnosis — heal 'error' providers now
+    let healed = 0;
+    if (set) {
+      const { providersForEnv } = await import('../core/secrets.js');
+      const { clearAuthError } = await import('../ingest/gateway.js');
+      healed = await clearAuthError(db, providersForEnv(parsed.data.env));
+    }
+    return { ok: true, set, healed };
   });
 
   // X1: the audit trail for "my key vanished" reports
@@ -491,6 +499,46 @@ export async function adminRoutes(app: FastifyInstance, opts: { db: Knex }): Pro
         backfillState.running = false;
       });
     return { started: true, depth: depthCfg };
+  });
+
+  // ── v1.4.6: news linking maintenance — re-seed aliases + full re-index
+  //    (statistical, idempotent; the boot hook does this once per alias
+  //    version, this button is the manual lever)
+  const reindexState = { running: false };
+  app.post('/api/admin/news/reindex', async (req, reply) => {
+    requireAdmin(req);
+    if (reindexState.running) return reply.code(409).send({ error: 'a re-index is already running' });
+    reindexState.running = true;
+    const { reseedAliases } = await import('../players/aliases.js');
+    const { indexNews } = await import('../news/indexer.js');
+    void reseedAliases(db)
+      .then(() => indexNews(db, { full: true }))
+      .then((r) => log.info(r, 'manual full news re-index'))
+      .catch((err) => log.error({ err: String(err) }, 'manual re-index failed'))
+      .finally(() => {
+        reindexState.running = false;
+      });
+    return { started: true };
+  });
+
+  app.get('/api/admin/news/link-stats', async (req) => {
+    requireAdmin(req);
+    const totals = (await db.raw(
+      `SELECT (SELECT count(*) FROM news_items) AS items,
+              (SELECT count(*) FROM news_items WHERE indexed_at IS NOT NULL) AS indexed,
+              (SELECT count(*) FROM news_player_map) AS links,
+              (SELECT count(DISTINCT player_uid) FROM news_player_map) AS players_linked,
+              (SELECT count(*) FROM players WHERE team_uid IS NOT NULL) AS players_active`,
+    )) as { rows: Record<string, unknown>[] };
+    const top = await db('news_player_map as m')
+      .join('players as p', 'p.uid', 'm.player_uid')
+      .leftJoin('teams as t', 't.uid', 'p.team_uid')
+      .select('p.web_name', 't.short_name as club')
+      .count({ links: '*' })
+      .groupBy('p.web_name', 't.short_name')
+      .orderBy('links', 'desc')
+      .limit(25);
+    return { totals: totals.rows[0], top, running: reindexState.running };
   });
 
   // ── A4 (v1.4.5): backtest & calibration harness

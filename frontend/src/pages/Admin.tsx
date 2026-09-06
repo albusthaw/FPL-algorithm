@@ -455,19 +455,66 @@ function WeightsTab(): ReactNode {
   );
 }
 
+// v1.4.6: news-linking health — how many articles are linked to how many
+// players, the top linked names (a manager/pundit collision shows up here),
+// and the manual re-index lever
+interface LinkStats { totals: { items: string; indexed: string; links: string; players_linked: string; players_active: string }; top: { web_name: string; club: string | null; links: string }[]; running: boolean }
+
 function LogsTab(): ReactNode {
   const [pulls, setPulls] = useState<{ log: { id: number; provider: string; capability: string; endpoint: string; records: number; latency_ms: number; status: string; error_class: string | null; created_at: string }[]; quarantined: number } | null>(null);
   const [ai, setAi] = useState<{ calls: { id: number; provider: string; kind: string; user_email: string; batch_size: number; prompt_tokens: string; completion_tokens: string; cached_tokens: string; credits: string; status: string; created_at: string }[]; daily: { day: string; credits: string; prompt: string; completion: string; cached: string }[] } | null>(null);
+  const [links, setLinks] = useState<LinkStats | null>(null);
+  const [reindexMsg, setReindexMsg] = useState('');
 
+  const loadLinks = (): void => {
+    void api.get<LinkStats>('/api/admin/news/link-stats').then(setLinks).catch(() => setLinks(null));
+  };
   useEffect(() => {
     void api.get<typeof pulls>('/api/admin/pull-log').then(setPulls);
     void api.get<typeof ai>('/api/admin/ai-calls').then(setAi);
+    loadLinks();
   }, []);
+
+  const reindex = async (): Promise<void> => {
+    setReindexMsg('');
+    try {
+      await api.post('/api/admin/news/reindex', {});
+      setReindexMsg('Re-index started — aliases re-seeded, every article re-linked. Refresh in a moment.');
+      setTimeout(loadLinks, 4000);
+    } catch (e) {
+      setReindexMsg(e instanceof ApiError ? e.message : String(e));
+    }
+  };
 
   if (!pulls || !ai) return <Loading />;
   const maxCredits = Math.max(1, ...ai.daily.map((d) => Number(d.credits)));
   return (
     <div className="stack">
+      {links && (
+        <div className="card" data-testid="news-link-stats">
+          <div className="spread">
+            <p className="kicker">News linking health</p>
+            <button className="chip-paper" onClick={() => void reindex()} disabled={links.running} data-testid="news-reindex">
+              {links.running ? 'Re-indexing…' : 'Re-index all news'}
+            </button>
+          </div>
+          <p className="mono" style={{ fontSize: '.8rem', marginTop: 6 }}>
+            {Number(links.totals.items).toLocaleString()} articles · {Number(links.totals.indexed).toLocaleString()} indexed · {Number(links.totals.links).toLocaleString()} player links ·{' '}
+            <b>{links.totals.players_linked}/{links.totals.players_active}</b> active players covered
+          </p>
+          {reindexMsg && <p className="mono muted" style={{ fontSize: '.74rem' }}>{reindexMsg}</p>}
+          <p className="row" style={{ gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+            {links.top.slice(0, 15).map((t) => (
+              <span key={`${t.web_name}-${t.club}`} className="badge" style={{ fontSize: '.68rem' }}>
+                {t.web_name}
+                <span className="muted" style={{ marginLeft: 5 }}>
+                  {t.club} · {t.links}
+                </span>
+              </span>
+            ))}
+          </p>
+        </div>
+      )}
       <div className="card">
         <p className="kicker">Daily AI cost (credits, last 30 days)</p>
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 90 }}>

@@ -154,11 +154,22 @@ export const DEFAULT_CONFIG: Record<string, unknown> = {
     credit_budget_run: 45,
     credit_budget_poll: 6,
   },
+  // v1.4.6: news indexer windows + admin-editable masked phrases (a manager
+  // or pundit whose name collides with a player's is blanked before matching)
+  news_indexer: {
+    rescan_days: 7,
+    cluster_days: 7,
+    cluster_sim: 0.85,
+    masked_phrases: [],
+  },
+  // v1.4.6: which alias-generation version this DB has been indexed with —
+  // the boot hook re-seeds aliases + re-indexes every article when behind
+  news_index_state: { alias_version: 0 },
   // C1 (v1.4.3): keyless RSS anchor feed registry (zero credits)
   rss_feeds: {
     feeds: [
       { id: 'bbc', url: 'https://feeds.bbci.co.uk/sport/football/rss.xml', tier: 1 },
-      { id: 'sky', url: 'https://www.skysports.com/rss/12040', tier: 1 },
+      { id: 'sky', url: 'https://www.skysports.com/rss/11661', tier: 1 }, // Sky Sports Premier League (12040 was all-sport)
       { id: 'guardian', url: 'https://www.theguardian.com/football/rss', tier: 2 },
     ],
     max_items_per_feed: 100,
